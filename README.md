@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <strong>简体中文</strong> · <a href="README.en.md">English</a>
+  <strong>简体中文</strong> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
 </p>
 
 HealthFlow 是一个面向体检报告和医疗单据的多模态医疗辅助系统原型，目标是把“单据理解、结构化指标、分诊路由、证据检索和安全校验”串成可审计的工程闭环。
