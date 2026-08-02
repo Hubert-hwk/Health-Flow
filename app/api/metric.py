@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 import json
 
 from app.data import get_db
+from app.data.mysql_client import get_mysql_client
 from app.data.models import MedicalReport as ReportModel, MetricRecord as MetricModel
 from app.schema.report import MetricRecord
 
@@ -35,7 +36,6 @@ async def get_metric_trend(
         指标趋势数据
     """
     # 获取数据库连接
-    from app.data.mysql_client import get_mysql_client
     mysql_client = get_mysql_client()
 
     with mysql_client.get_session() as db:
@@ -158,7 +158,6 @@ async def search_metrics(
     Returns:
         指标列表
     """
-    from app.data.mysql_client import get_mysql_client
     mysql_client = get_mysql_client()
 
     with mysql_client.get_session() as db:
@@ -233,7 +232,6 @@ async def get_anomalies(
     Returns:
         异常指标列表
     """
-    from app.data.mysql_client import get_mysql_client
     mysql_client = get_mysql_client()
 
     with mysql_client.get_session() as db:

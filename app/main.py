@@ -1,76 +1,78 @@
-"""FastAPI application entry point."""
+"""FastAPI entry point for HealthFlow."""
 
 from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.data.milvus_client import get_milvus_client
 from app.data.mysql_client import get_mysql_client
+from app.data.neo4j_client import get_neo4j_client
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan events."""
-    # Startup
     settings = get_settings()
-    print(f"Starting HealthFlow API v0.1.0")
-    print(f"Database: {settings.MYSQL_HOST}:{settings.MYSQL_PORT}/{settings.MYSQL_DATABASE}")
-    print(f"vLLM: {settings.VLLM_HOST}:{settings.VLLM_PORT}")
-
-    # Initialize database tables
-    mysql_client = get_mysql_client()
+    database = get_mysql_client()
     try:
-        mysql_client.create_tables()
-        print("Database tables created/verified")
-    except Exception as e:
-        print(f"Database initialization warning: {e}")
-
-    yield
-
-    # Shutdown
-    print("Shutting down HealthFlow API")
-    mysql_client.close()
+        database.create_tables()
+        yield
+    finally:
+        database.close()
 
 
 app = FastAPI(
-    title="HealthFlow API",
-    description="HealthFlow 医疗辅助系统 - Python版本",
+    title="HealthFlow 医疗辅助系统",
+    description="面向体检报告理解、证据检索和安全问答的医疗辅助系统。不能替代医生。",
     version="0.1.0",
     lifespan=lifespan,
 )
-
-# CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://localhost:3000"],
+    allow_origins=get_settings().cors_origins,
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
 
 @app.get("/")
 async def root():
-    """Root endpoint."""
     return {
+        "name": "HealthFlow Medical Assistant",
         "message": "HealthFlow Medical Assistant API",
         "version": "0.1.0",
-        "docs": "/docs"
+        "scope": "medical-assistance-only",
+        "docs": "/docs",
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint."""
+    settings = get_settings()
     return {
         "status": "healthy",
         "version": "0.1.0",
-        "service": "healthflow-python"
+        "service": "healthflow-python",
+        "database": settings.database_url.split(":", 1)[0],
     }
 
 
-# Import and include routers
-from app.api import chat, report, metric, kg, train
+@app.get("/ready")
+async def readiness_check():
+    database = get_mysql_client()
+    milvus = get_milvus_client()
+    neo4j = get_neo4j_client()
+    return {
+        "status": "ready",
+        "database": "ok",
+        "milvus": "ok" if milvus.available else "optional_unavailable",
+        "neo4j": "ok" if neo4j.available else "optional_unavailable",
+    }
+
+
+from app.api import chat, kg, metric, report, train  # noqa: E402
 
 app.include_router(chat.router, prefix="/api/health", tags=["Chat"])
 app.include_router(report.router, prefix="/api/health", tags=["Report"])

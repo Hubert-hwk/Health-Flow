@@ -6,10 +6,14 @@
 from typing import List, Optional
 from fastapi import APIRouter, HTTPException, Query, Path
 
-from app.data.neo4j_client import get_neo4j_client
-
-
 router = APIRouter()
+
+
+def _get_neo4j_client():
+    # Resolve lazily so tests/deployments can replace the optional connector.
+    from app.data.neo4j_client import get_neo4j_client
+
+    return get_neo4j_client()
 
 
 @router.post("/kg/query")
@@ -29,7 +33,7 @@ async def query_knowledge_graph(
     Returns:
         实体相关信息
     """
-    neo4j_client = get_neo4j_client()
+    neo4j_client = _get_neo4j_client()
 
     try:
         results = neo4j_client.query_by_entity(entity, limit=limit)
@@ -55,7 +59,7 @@ async def get_disease_symptoms(
     Returns:
         相关症状列表
     """
-    neo4j_client = get_neo4j_client()
+    neo4j_client = _get_neo4j_client()
 
     try:
         symptoms = neo4j_client.get_related_symptoms(disease)
@@ -81,7 +85,7 @@ async def get_disease_drugs(
     Returns:
         相关药品列表
     """
-    neo4j_client = get_neo4j_client()
+    neo4j_client = _get_neo4j_client()
 
     try:
         drugs = neo4j_client.get_related_drugs(disease)
@@ -107,7 +111,7 @@ async def get_disease_examinations(
     Returns:
         相关检查项目列表
     """
-    neo4j_client = get_neo4j_client()
+    neo4j_client = _get_neo4j_client()
 
     try:
         examinations = neo4j_client.get_related_examinations(disease)
@@ -133,7 +137,7 @@ async def get_symptom_department(
     Returns:
         所属科室
     """
-    neo4j_client = get_neo4j_client()
+    neo4j_client = _get_neo4j_client()
 
     try:
         department = neo4j_client.get_department(symptom)
@@ -159,7 +163,7 @@ async def find_diagnosis(
     Returns:
         可能的疾病列表
     """
-    neo4j_client = get_neo4j_client()
+    neo4j_client = _get_neo4j_client()
 
     if not symptoms:
         raise HTTPException(status_code=400, detail="症状列表不能为空")
@@ -186,7 +190,7 @@ async def kg_health_check():
     Returns:
         连接状态
     """
-    neo4j_client = get_neo4j_client()
+    neo4j_client = _get_neo4j_client()
 
     try:
         connected = neo4j_client.connect()

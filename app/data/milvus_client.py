@@ -1,86 +1,84 @@
-"""Milvus vector database client."""
+"""Milvus client with an explicit optional-service boundary."""
 
-from typing import List, Optional, Dict, Any
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
 
 from app.config import get_settings
 
 
 class MilvusClient:
-    """Milvus vector database client."""
-
     def __init__(
         self,
         host: Optional[str] = None,
         port: Optional[int] = None,
         collection_name: str = "medical_reports",
         dim: int = 1024,
-    ):
-        """
-        Initialize Milvus client.
-
-        Args:
-            host: Milvus host
-            port: Milvus port
-            collection_name: Collection name
-            dim: Embedding dimension
-        """
+    ) -> None:
         settings = get_settings()
         self.host = host or settings.MILVUS_HOST
         self.port = port or settings.MILVUS_PORT
         self.collection_name = collection_name
         self.dim = dim
         self._client = None
-        self._collection = None
+        self._collection_ready = False
+        self.last_error: Optional[str] = None
 
     @property
     def client(self):
-        """Get Milvus client (lazy initialization)."""
         if self._client is None:
             try:
-                from pymilvus import MilvusClient
-                self._client = MilvusClient(uri=f"http://{self.host}:{self.port}")
-            except ImportError:
-                # For testing without actual Milvus
+                from pymilvus import MilvusClient as SDKMilvusClient
+
+                self._client = SDKMilvusClient(uri=f"http://{self.host}:{self.port}")
+            except Exception as exc:
+                self.last_error = str(exc)
                 self._client = None
         return self._client
 
     @property
-    def collection(self):
-        """Get Milvus collection."""
-        if self._collection is None and self.client:
-            self._collection = self.client.get_collection(self.collection_name)
-        return self._collection
+    def available(self) -> bool:
+        return self.client is not None
 
     def connect(self):
-        """Connect to Milvus."""
         return self.client
 
-    def create_collection(self, drop_existing: bool = False):
-        """
-        Create collection with schema.
-
-        Args:
-            drop_existing: Whether to drop existing collection
-        """
+    def ensure_collection(self) -> bool:
         if not self.client:
-            return
-
+            return False
+        if self._collection_ready:
+            return True
         try:
-            if drop_existing and self.collection_name in self.client.list_collections():
-                self.client.drop_collection(self.collection_name)
-
-            if self.collection_name not in self.client.list_collections():
+            collections = self.client.list_collections()
+            if self.collection_name not in collections:
                 self.client.create_collection(
                     collection_name=self.collection_name,
                     dimension=self.dim,
                     primary_field_name="id",
                     vector_field_name="embedding",
                     metric_type="COSINE",
-                    index_type="AUTOINDEX",
+                    auto_id=False,
+                    enable_dynamic_field=True,
                 )
-        except Exception:
-            # Collection might already exist
-            pass
+            self._collection_ready = True
+            return True
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
+
+    def create_collection(self, drop_existing: bool = False):
+        if not self.client:
+            return False
+        try:
+            collections = self.client.list_collections()
+            if drop_existing and self.collection_name in collections:
+                self.client.drop_collection(self.collection_name)
+                collections = []
+            self._collection_ready = False
+            return self.ensure_collection()
+        except Exception as exc:
+            self.last_error = str(exc)
+            return False
 
     def insert(
         self,
@@ -89,36 +87,26 @@ class MilvusClient:
         embeddings: List[List[float]],
         departments: Optional[List[str]] = None,
     ) -> List[int]:
-        """
-        Insert vectors into collection.
-
-        Args:
-            report_ids: Report IDs
-            texts: Text content
-            embeddings: Embedding vectors
-            departments: Department labels
-
-        Returns:
-            List of inserted IDs
-        """
-        if not self.client:
+        if not self.ensure_collection():
             return []
-
-        data = [
-            {"id": rid, "report_id": rid, "content": text, "embedding": emb}
-            for rid, text, emb in zip(report_ids, texts, embeddings)
-        ]
-        if departments:
-            for i, d in enumerate(data):
-                data[i]["department"] = departments[i] if i < len(departments) else None
-
-        try:
-            result = self.client.insert(
-                collection_name=self.collection_name,
-                data=data,
+        if not (len(report_ids) == len(texts) == len(embeddings)):
+            raise ValueError("report_ids、texts 和 embeddings 长度必须一致")
+        data = []
+        for index, (report_id, text, embedding) in enumerate(zip(report_ids, texts, embeddings)):
+            data.append(
+                {
+                    "id": int(report_id),
+                    "report_id": int(report_id),
+                    "content": text,
+                    "embedding": embedding,
+                    "department": departments[index] if departments and index < len(departments) else "",
+                }
             )
-            return result.get("ids", [])
-        except Exception:
+        try:
+            result = self.client.insert(collection_name=self.collection_name, data=data)
+            return list(result.get("ids", report_ids)) if isinstance(result, dict) else report_ids
+        except Exception as exc:
+            self.last_error = str(exc)
             return []
 
     def search(
@@ -127,87 +115,68 @@ class MilvusClient:
         top_k: int = 5,
         department: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        Search similar vectors.
-
-        Args:
-            query_embedding: Query embedding vector
-            top_k: Number of results
-            department: Optional department filter
-
-        Returns:
-            List of search results
-        """
-        if not self.client:
+        if not self.ensure_collection():
             return []
-
-        filter_expr = f'department == "{department}"' if department else None
-
+        filter_expr = None
+        if department:
+            escaped = department.replace('"', '\\"')
+            filter_expr = f'department == "{escaped}"'
         try:
             results = self.client.search(
                 collection_name=self.collection_name,
                 data=[query_embedding],
-                limit=top_k,
+                limit=max(1, min(top_k, 100)),
                 filter=filter_expr,
-                output_fields=["id", "report_id", "content", "department"],
+                output_fields=["report_id", "content", "department"],
             )
-
-            return [
-                {
-                    "id": hit["id"],
-                    "report_id": hit["report_id"],
-                    "content": hit["content"],
-                    "department": hit["department"],
-                    "distance": hit["distance"],
-                }
-                for hit in results[0]
-            ]
-        except Exception:
+            hits = results[0] if results else []
+            parsed: list[dict[str, Any]] = []
+            for hit in hits:
+                entity = hit.get("entity", hit) if hasattr(hit, "get") else hit
+                parsed.append(
+                    {
+                        "id": hit.get("id") if hasattr(hit, "get") else None,
+                        "report_id": entity.get("report_id") if hasattr(entity, "get") else None,
+                        "content": entity.get("content", "") if hasattr(entity, "get") else "",
+                        "department": entity.get("department", "") if hasattr(entity, "get") else "",
+                        "distance": hit.get("distance", 0.0) if hasattr(hit, "get") else 0.0,
+                    }
+                )
+            return parsed
+        except Exception as exc:
+            self.last_error = str(exc)
             return []
 
     def delete_by_report_id(self, report_id: int) -> bool:
-        """
-        Delete vectors by report ID.
-
-        Args:
-            report_id: Report ID
-
-        Returns:
-            Success status
-        """
-        if not self.client:
+        if not self.ensure_collection():
             return False
-
         try:
             self.client.delete(
                 collection_name=self.collection_name,
-                filter=f"report_id == {report_id}",
+                filter=f"report_id == {int(report_id)}",
             )
             return True
-        except Exception:
+        except Exception as exc:
+            self.last_error = str(exc)
             return False
 
-    def flush(self):
-        """Flush collection to persist data."""
-        if self.client:
+    def flush(self) -> None:
+        # MilvusClient commits inserts synchronously; older SDKs may expose flush.
+        if self.client and hasattr(self.client, "flush"):
             try:
                 self.client.flush(self.collection_name)
-            except Exception:
-                pass
+            except Exception as exc:
+                self.last_error = str(exc)
 
-    def close(self):
-        """Close client connection."""
-        if self._client:
-            self._client = None
-            self._collection = None
+    def close(self) -> None:
+        self._client = None
+        self._collection_ready = False
 
 
-# Global instance
 _milvus_client: MilvusClient | None = None
 
 
 def get_milvus_client() -> MilvusClient:
-    """Get Milvus client singleton."""
     global _milvus_client
     if _milvus_client is None:
         _milvus_client = MilvusClient()

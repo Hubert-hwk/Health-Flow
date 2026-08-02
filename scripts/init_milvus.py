@@ -1,137 +1,124 @@
-"""
-Milvus vector database initialization script.
-Creates collections and indexes for the HealthFlow knowledge base.
+"""Initialise the optional Milvus collections used by HealthFlow.
+
+The application only requires ``medical_reports`` at runtime.  The other two
+collections are kept here as explicit knowledge-base/entity boundaries so a
+deployment can initialise the full retrieval topology in one command.
 """
 
 from __future__ import annotations
 
-import logging
-from typing import TYPE_CHECKING
+import argparse
+from typing import Any
 
-if TYPE_CHECKING:
-    from pymilvus import MilvusClient
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
-
-MILVUS_HOST = "127.0.0.1"
-MILVUS_PORT = "19530"
-DIM_EMBEDDING = 1024  # matches the embedding model output dimension
+from app.config import get_settings
 
 
-def create_medical_kb_collection(client: "MilvusClient") -> None:
-    """Create the medical knowledge base collection with optimized HNSW index."""
-    from pymilvus import CollectionSchema, DataType, FieldSchema, utility
+EMBEDDING_DIM = 1024
 
-    collection_name = "medical_kb"
-    fields = [
-        FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=64, is_primary=True),
-        FieldSchema(name="chunk_id", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=4096),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT16_VECTOR, dim=DIM_EMBEDDING),
-        FieldSchema(name="metadata", dtype=DataType.JSON),
-    ]
-    schema = CollectionSchema(
-        fields=fields,
-        description="Medical knowledge base with disease, symptom, treatment, drug information",
+
+def _schema(collection_name: str) -> Any:
+    """Build a compatible schema without importing the SDK at module import."""
+
+    from pymilvus import CollectionSchema, DataType, FieldSchema
+
+    primary = FieldSchema(
+        name="id", dtype=DataType.INT64, is_primary=True, auto_id=False
     )
+    fields = [primary]
+    if collection_name == "medical_reports":
+        fields.extend(
+            [
+                FieldSchema(name="report_id", dtype=DataType.INT64),
+                FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
+                FieldSchema(
+                    name="embedding",
+                    dtype=DataType.FLOAT_VECTOR,
+                    dim=EMBEDDING_DIM,
+                ),
+                FieldSchema(name="department", dtype=DataType.VARCHAR, max_length=64),
+            ]
+        )
+    else:
+        fields.extend(
+            [
+                FieldSchema(name="content", dtype=DataType.VARCHAR, max_length=65535),
+                FieldSchema(
+                    name="embedding",
+                    dtype=DataType.FLOAT_VECTOR,
+                    dim=EMBEDDING_DIM,
+                ),
+            ]
+        )
+    return CollectionSchema(fields=fields, description=f"HealthFlow {collection_name}")
 
-    if utility.has_collection(collection_name):
-        logger.info(f"Collection '{collection_name}' already exists, dropping and recreating")
-        client.drop_collection(collection_name)
+
+def _create_collection(client: Any, collection_name: str) -> None:
+    """Create one collection if it is absent.
+
+    ``utility.has_collection`` is used when available for compatibility with
+    older pymilvus deployments; the client call itself remains easy to mock in
+    CI and in local development.
+    """
+
+    from pymilvus import utility
+
+    try:
+        if utility.has_collection(collection_name):
+            return
+    except Exception:
+        # A remote utility connection may not be configured yet.  Let the
+        # MilvusClient report the real connection error instead.
+        pass
 
     client.create_collection(
         collection_name=collection_name,
-        schema=schema,
+        schema=_schema(collection_name),
         vector_field_name="embedding",
         metric_type="COSINE",
         index_type="HNSW",
         params={"M": 16, "efConstruction": 256},
     )
-    logger.info(f"Collection '{collection_name}' created with HNSW index")
 
 
-def create_medical_entities_collection(client: "MilvusClient") -> None:
-    """Create the medical entities collection for entity-level retrieval."""
-    from pymilvus import CollectionSchema, DataType, FieldSchema, utility
-
-    collection_name = "medical_entities"
-    fields = [
-        FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=64, is_primary=True),
-        FieldSchema(name="entity_type", dtype=DataType.VARCHAR, max_length=32),
-        FieldSchema(name="name", dtype=DataType.VARCHAR, max_length=256),
-        FieldSchema(name="description", dtype=DataType.VARCHAR, max_length=2048),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT16_VECTOR, dim=DIM_EMBEDDING),
-        FieldSchema(name="metadata", dtype=DataType.JSON),
-    ]
-    schema = CollectionSchema(
-        fields=fields,
-        description="Medical entity registry for entity-level RAG retrieval",
-    )
-
-    if utility.has_collection(collection_name):
-        logger.info(f"Collection '{collection_name}' already exists, dropping and recreating")
-        client.drop_collection(collection_name)
-
-    client.create_collection(
-        collection_name=collection_name,
-        schema=schema,
-        vector_field_name="embedding",
-        metric_type="COSINE",
-        index_type="HNSW",
-        params={"M": 16, "efConstruction": 256},
-    )
-    logger.info(f"Collection '{collection_name}' created with HNSW index")
+def create_medical_kb_collection(client: Any) -> None:
+    _create_collection(client, "medical_kb")
 
 
-def create_reports_collection(client: "MilvusClient") -> None:
-    """Create the medical reports collection for report content retrieval."""
-    from pymilvus import CollectionSchema, DataType, FieldSchema, utility
-
-    collection_name = "medical_reports"
-    fields = [
-        FieldSchema(name="id", dtype=DataType.VARCHAR, max_length=64, is_primary=True),
-        FieldSchema(name="report_type", dtype=DataType.VARCHAR, max_length=32),
-        FieldSchema(name="patient_id", dtype=DataType.VARCHAR, max_length=64),
-        FieldSchema(name="summary", dtype=DataType.VARCHAR, max_length=4096),
-        FieldSchema(name="embedding", dtype=DataType.FLOAT16_VECTOR, dim=DIM_EMBEDDING),
-        FieldSchema(name="metadata", dtype=DataType.JSON),
-    ]
-    schema = CollectionSchema(
-        fields=fields,
-        description="Medical reports vector store for similarity search",
-    )
-
-    if utility.has_collection(collection_name):
-        logger.info(f"Collection '{collection_name}' already exists, dropping and recreating")
-        client.drop_collection(collection_name)
-
-    client.create_collection(
-        collection_name=collection_name,
-        schema=schema,
-        vector_field_name="embedding",
-        metric_type="COSINE",
-        index_type="HNSW",
-        params={"M": 16, "efConstruction": 256},
-    )
-    logger.info(f"Collection '{collection_name}' created with HNSW index")
+def create_medical_entities_collection(client: Any) -> None:
+    _create_collection(client, "medical_entities")
 
 
-def init_milvus(host: str = MILVUS_HOST, port: str = MILVUS_PORT) -> "MilvusClient":
-    """Connect to Milvus and initialise all collections."""
+def create_reports_collection(client: Any) -> None:
+    _create_collection(client, "medical_reports")
+
+
+def init_milvus(drop_existing: bool = False) -> Any:
+    """Connect to Milvus and initialise all HealthFlow collections."""
+
     from pymilvus import MilvusClient, connections
 
-    logger.info(f"Connecting to Milvus at {host}:{port}")
-    connections.connect(host=host, port=port, alias="default")
-    client = MilvusClient(uri=f"http://{host}:{port}")
+    settings = get_settings()
+    connections.connect(host=settings.MILVUS_HOST, port=str(settings.MILVUS_PORT))
+    client = MilvusClient(uri=f"http://{settings.MILVUS_HOST}:{settings.MILVUS_PORT}")
+
+    if drop_existing:
+        for collection_name in ("medical_kb", "medical_entities", "medical_reports"):
+            try:
+                if client.has_collection(collection_name):
+                    client.drop_collection(collection_name)
+            except Exception:
+                # Older clients do not expose has_collection; creation below
+                # will still provide the actionable server-side error.
+                pass
 
     create_medical_kb_collection(client)
     create_medical_entities_collection(client)
     create_reports_collection(client)
-
-    logger.info("Milvus initialisation complete")
     return client
 
 
 if __name__ == "__main__":
-    init_milvus()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--drop-existing", action="store_true")
+    args = parser.parse_args()
+    init_milvus(args.drop_existing)
