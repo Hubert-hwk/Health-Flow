@@ -1,43 +1,46 @@
-"""MySQL database client."""
+"""Database client with SQLite development fallback and production URLs."""
 
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Generator
 
 from sqlalchemy import create_engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import get_settings
 from app.data.models import Base
 
 
 class MySQLClient:
-    """MySQL database client."""
+    """Historical name retained for API compatibility; supports any SQLAlchemy URL."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.settings = get_settings()
-        self.engine = create_engine(
-            self.settings.mysql_url,
-            pool_pre_ping=True,
-            pool_size=10,
-            max_overflow=20,
-        )
+        database_url = self.settings.database_url
+        engine_kwargs: dict = {"pool_pre_ping": True}
+        if database_url.startswith("sqlite"):
+            Path("data").mkdir(parents=True, exist_ok=True)
+            engine_kwargs["connect_args"] = {"check_same_thread": False}
+        else:
+            engine_kwargs.update({"pool_size": 10, "max_overflow": 20})
+
+        self.engine = create_engine(database_url, **engine_kwargs)
         self.SessionLocal = sessionmaker(
             autocommit=False,
             autoflush=False,
             bind=self.engine,
         )
+        self._tables_initialized = False
 
-    def create_tables(self):
-        """Create all tables."""
+    def create_tables(self) -> None:
         Base.metadata.create_all(bind=self.engine)
+        self._tables_initialized = True
 
-    def drop_tables(self):
-        """Drop all tables."""
+    def drop_tables(self) -> None:
         Base.metadata.drop_all(bind=self.engine)
 
     @contextmanager
     def get_session(self) -> Generator[Session, None, None]:
-        """Get database session context manager."""
         session = self.SessionLocal()
         try:
             yield session
@@ -48,17 +51,14 @@ class MySQLClient:
         finally:
             session.close()
 
-    def close(self):
-        """Close database connection."""
+    def close(self) -> None:
         self.engine.dispose()
 
 
-# Global instance
 _mysql_client: MySQLClient | None = None
 
 
 def get_mysql_client() -> MySQLClient:
-    """Get MySQL client singleton."""
     global _mysql_client
     if _mysql_client is None:
         _mysql_client = MySQLClient()
@@ -66,7 +66,8 @@ def get_mysql_client() -> MySQLClient:
 
 
 def get_db() -> Generator[Session, None, None]:
-    """Get database session for FastAPI dependency injection."""
     client = get_mysql_client()
+    if not client._tables_initialized:
+        client.create_tables()
     with client.get_session() as session:
         yield session

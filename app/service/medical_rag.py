@@ -1,45 +1,30 @@
-"""MedicalRAG Service - 医疗混合RAG服务.
+"""Hybrid medical retrieval with source-aware evidence formatting."""
 
-向量检索 + 知识图谱混合召回。
-"""
+from __future__ import annotations
 
-from typing import List, Dict, Any, Optional, Tuple
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
-from app.model.embedding import get_embedding_client
-from app.model.llm import get_llm_client
 from app.data.milvus_client import get_milvus_client
 from app.data.neo4j_client import get_neo4j_client
+from app.model.embedding import get_embedding_client
+from app.model.llm import get_llm_client
+
+
+MEDICAL_ENTITY_TERMS = (
+    "血糖", "糖尿病", "糖化血红蛋白", "血压", "血脂", "尿酸", "甲状腺", "心脏",
+    "胸痛", "咳嗽", "呼吸", "胃", "肝", "胆", "腹痛", "便秘", "体检报告",
+)
 
 
 class MedicalRAGService:
-    """
-    医疗混合RAG服务。
+    """Dense retrieval + constrained graph expansion + reciprocal-rank fusion."""
 
-    核心职责:
-    1. 向量检索召回
-    2. 知识图谱增强召回
-    3. 混合融合与重排序
-    4. 检索过滤
-    """
-
-    def __init__(
-        self,
-        vector_weight: float = 0.6,
-        kg_weight: float = 0.4,
-        top_k: int = 5
-    ):
-        """
-        初始化MedicalRAG服务。
-
-        Args:
-            vector_weight: 向量检索权重
-            kg_weight: 知识图谱权重
-            top_k: 返回结果数量
-        """
-        self.vector_weight = vector_weight
-        self.kg_weight = kg_weight
+    def __init__(self, vector_weight: float = 0.6, kg_weight: float = 0.4, top_k: int = 5) -> None:
+        total = max(vector_weight + kg_weight, 1e-6)
+        self.vector_weight = vector_weight / total
+        self.kg_weight = kg_weight / total
         self.top_k = top_k
-
         self._embedding_client = None
         self._milvus_client = None
         self._neo4j_client = None
@@ -47,342 +32,191 @@ class MedicalRAGService:
 
     @property
     def embedding_client(self):
-        """获取Embedding客户端。"""
         if self._embedding_client is None:
             self._embedding_client = get_embedding_client()
         return self._embedding_client
 
     @property
     def milvus_client(self):
-        """获取Milvus客户端。"""
         if self._milvus_client is None:
             self._milvus_client = get_milvus_client()
         return self._milvus_client
 
     @property
     def neo4j_client(self):
-        """获取Neo4j客户端。"""
         if self._neo4j_client is None:
             self._neo4j_client = get_neo4j_client()
         return self._neo4j_client
 
     @property
     def llm_client(self):
-        """获取LLM客户端。"""
         if self._llm_client is None:
             self._llm_client = get_llm_client()
         return self._llm_client
 
     def vector_search(
-        self,
-        query: str,
-        top_k: Optional[int] = None,
-        department: Optional[str] = None
+        self, query: str, top_k: Optional[int] = None, department: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """
-        向量检索。
-
-        Args:
-            query: 查询文本
-            top_k: 返回数量
-            department: 科室过滤
-
-        Returns:
-            检索结果列表
-        """
-        # 生成查询向量
-        query_embedding = self.embedding_client.embed(query)
-
-        # 执行搜索
-        results = self.milvus_client.search(
-            query_embedding=query_embedding,
-            top_k=top_k or self.top_k,
-            department=department
-        )
-
+        try:
+            embedding = self.embedding_client.embed(query)
+            values = self.milvus_client.search(embedding, top_k or self.top_k, department)
+        except Exception:
+            return []
+        results: list[dict[str, Any]] = []
+        for index, item in enumerate(values):
+            item = dict(item)
+            item.setdefault("source", "vector")
+            item.setdefault("source_id", f"V{index + 1}")
+            item.setdefault("content", "")
+            item.setdefault("score", self._distance_to_score(item.get("distance"), index, len(values)))
+            results.append(item)
         return results
 
-    def kg_search(
-        self,
-        query: str,
-        top_k: Optional[int] = None
-    ) -> List[Dict[str, Any]]:
-        """
-        知识图谱检索。
-
-        从query中提取医学实体，查询相关知识。
-
-        Args:
-            query: 查询文本
-            top_k: 返回数量
-
-        Returns:
-            知识图谱结果列表
-        """
-        # 提取医学实体
+    def kg_search(self, query: str, top_k: Optional[int] = None) -> List[Dict[str, Any]]:
         entities = self._extract_medical_entities(query)
+        results: list[dict[str, Any]] = []
+        for entity in entities[:5]:
+            try:
+                if hasattr(self.neo4j_client, "query_by_entity"):
+                    graph_items = self.neo4j_client.query_by_entity(entity, limit=5)
+                else:
+                    graph_items = []
+                for item in graph_items:
+                    result = dict(item)
+                    result.update(
+                        {
+                            "source": "graph",
+                            "source_id": result.get("source_id") or f"G-{entity}",
+                            "entity": entity,
+                            "content": result.get("description") or self._format_graph_item(result),
+                            "path": result.get("path", []),
+                        }
+                    )
+                    results.append(result)
 
-        if not entities:
-            return []
-
-        results = []
-
-        # 查询每个实体的相关知识
-        for entity in entities[:3]:  # 最多处理3个实体
-            # 查询相关症状
-            symptoms = self.neo4j_client.get_related_symptoms(entity)
-            for symptom in symptoms:
-                results.append({
-                    "type": "symptom",
-                    "entity": entity,
-                    "name": symptom["name"],
-                    "description": symptom.get("description", ""),
-                    "source": "knowledge_graph"
-                })
-
-            # 查询相关药品
-            drugs = self.neo4j_client.get_related_drugs(entity)
-            for drug in drugs:
-                results.append({
-                    "type": "drug",
-                    "entity": entity,
-                    "name": drug["name"],
-                    "description": drug.get("description", ""),
-                    "source": "knowledge_graph"
-                })
-
-            # 查询诊断路径
-            diagnosis_paths = self.neo4j_client.find_diagnosis_path([entity])
-            for path in diagnosis_paths:
-                results.append({
-                    "type": "diagnosis",
-                    "entity": entity,
-                    "name": path["disease"],
-                    "description": path.get("description", ""),
-                    "matched_symptoms": path.get("matched_symptoms", []),
-                    "source": "knowledge_graph"
-                })
-
-        # 去重并限制数量
-        seen = set()
-        unique_results = []
-        for r in results:
-            key = f"{r['type']}:{r['name']}"
-            if key not in seen:
-                seen.add(key)
-                unique_results.append(r)
-
-        return unique_results[:top_k or self.top_k]
+                # Keep the domain-specific methods as a compatibility path for
+                # older Neo4j adapters and small test doubles.
+                for item in getattr(self.neo4j_client, "get_related_symptoms", lambda _: [])(entity):
+                    results.append({
+                        "type": "symptom", "name": item.get("name", ""),
+                        "description": item.get("description", ""), "entity": entity,
+                        "source": "graph", "source_id": f"G-symptom-{entity}",
+                    })
+                for item in getattr(self.neo4j_client, "get_related_drugs", lambda _: [])(entity):
+                    results.append({
+                        "type": "drug", "name": item.get("name", ""),
+                        "description": item.get("description", ""), "entity": entity,
+                        "source": "graph", "source_id": f"G-drug-{entity}",
+                    })
+                for item in getattr(self.neo4j_client, "find_diagnosis_path", lambda _: [])([entity]):
+                    results.append({
+                        "type": "diagnosis", "name": item.get("disease", ""),
+                        "description": item.get("description", ""), "entity": entity,
+                        "matched_symptoms": item.get("matched_symptoms", []),
+                        "source": "graph", "source_id": f"G-diagnosis-{entity}",
+                    })
+            except Exception:
+                continue
+        return self._deduplicate(results)[: top_k or self.top_k]
 
     def hybrid_search(
-        self,
-        query: str,
-        top_k: Optional[int] = None,
-        department: Optional[str] = None
+        self, query: str, top_k: Optional[int] = None, department: Optional[str] = None
     ) -> List[Dict[str, Any]]:
-        """
-        混合搜索 - 向量 + 知识图谱。
-
-        Args:
-            query: 查询文本
-            top_k: 返回数量
-            department: 科室过滤
-
-        Returns:
-            混合检索结果列表
-        """
         k = top_k or self.top_k
-
-        # 并行执行向量搜索和KG搜索
         vector_results = self.vector_search(query, k * 2, department)
-        kg_results = self.kg_search(query, k * 2)
-
-        # 融合结果
-        fused_results = self._fuse_results(vector_results, kg_results, query)
-
-        return fused_results[:k]
+        graph_results = self.kg_search(query, k * 2)
+        return self._fuse_results(vector_results, graph_results)[:k]
 
     def _fuse_results(
         self,
         vector_results: List[Dict[str, Any]],
-        kg_results: List[Dict[str, Any]],
-        query: str
+        graph_results: List[Dict[str, Any]],
+        query: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
-        """
-        融合向量和KG的检索结果。
+        fused: dict[str, dict[str, Any]] = {}
 
-        Args:
-            vector_results: 向量检索结果
-            kg_results: KG检索结果
-            query: 原始查询
+        def add(items: list[dict[str, Any]], weight: float, prefix: str) -> None:
+            size = max(1, len(items))
+            for rank, item in enumerate(items, start=1):
+                key = str(item.get("source_id") or item.get("id") or item.get("content", "")[:120])
+                key = f"{prefix}:{key}"
+                contribution = weight / (30 + rank) + weight * float(item.get("score", 0.0)) * 0.1
+                if key in fused:
+                    fused[key]["score"] += contribution
+                else:
+                    fused[key] = {**item, "score": contribution}
 
-        Returns:
-            融合后的结果列表
-        """
-        # 为每个结果分配分数
-        scored_results: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+        add(vector_results, self.vector_weight, "V")
+        add(graph_results, self.kg_weight, "G")
+        return sorted(fused.values(), key=lambda item: item["score"], reverse=True)
 
-        # 向量结果打分 (0-1)
-        for i, result in enumerate(vector_results):
-            key = f"vector:{result.get('content', '')[:50]}"
-            # 排名得分
-            rank_score = 1.0 - (i / len(vector_results)) if vector_results else 0
-            # 距离得分（Milvus返回的是distance）
-            distance_score = 1.0 - result.get("distance", 0.5)
-            vector_score = self.vector_weight * (rank_score * 0.4 + distance_score * 0.6)
-            scored_results[key] = (vector_score, result)
-
-        # KG结果打分
-        for i, result in enumerate(kg_results):
-            key = f"kg:{result.get('name', '')[:50]}"
-            rank_score = 1.0 - (i / len(kg_results)) if kg_results else 0
-            kg_score = self.kg_weight * rank_score
-
-            if key in scored_results:
-                old_score, old_result = scored_results[key]
-                scored_results[key] = (old_score + kg_score, old_result)
-            else:
-                scored_results[key] = (kg_score, result)
-
-        # 按分数排序
-        sorted_results = sorted(
-            scored_results.values(),
-            key=lambda x: x[0],
-            reverse=True
-        )
-
-        return [r[1] for r in sorted_results]
-
-    def _extract_medical_entities(self, query: str) -> List[str]:
-        """
-        从查询中提取医学实体。
-
-        Args:
-            query: 查询文本
-
-        Returns:
-            实体名称列表
-        """
-        prompt = f"""从以下文本中提取医学实体（疾病、症状、指标名称）。
-
-文本:
-{query}
-
-只输出实体名称，用逗号分隔。例如: 空腹血糖, 糖尿病, 多饮
-
-只输出实体名称，不要其他内容。"""
-
+    def _extract_medical_entities(self, query: str) -> list[str]:
+        entities = [term for term in MEDICAL_ENTITY_TERMS if term in query]
+        if entities:
+            return entities
         try:
             response = self.llm_client.chat(
                 messages=[
-                    {"role": "system", "content": "你是一个医疗实体提取助手。"},
-                    {"role": "user", "content": prompt}
+                    {"role": "system", "content": "提取医疗实体，只返回逗号分隔的实体名。"},
+                    {"role": "user", "content": query},
                 ]
             )
-
-            # 解析响应
-            entities = [e.strip() for e in response.split(",") if e.strip()]
-            return entities
-
+            return [item.strip() for item in re.split(r"[,，、\n]", response) if item.strip()][:5]
         except Exception:
             return []
 
-    def build_context(
-        self,
-        query: str,
-        department: Optional[str] = None
-    ) -> str:
-        """
-        构建RAG上下文。
+    @staticmethod
+    def _distance_to_score(distance: Any, rank: int, size: int) -> float:
+        try:
+            value = float(distance)
+        except (TypeError, ValueError):
+            return max(0.0, 1.0 - rank / max(1, size))
+        return max(0.0, min(1.0, value if 0 <= value <= 1 else 1.0 / (1.0 + value)))
 
-        Args:
-            query: 查询文本
-            department: 科室
+    @staticmethod
+    def _format_graph_item(item: dict[str, Any]) -> str:
+        entity = item.get("entity", "")
+        related = item.get("related_entity", "")
+        relation = item.get("relation", "related_to")
+        return f"{entity} -[{relation}]-> {related}".strip()
 
-        Returns:
-            上下文字符串
-        """
-        results = self.hybrid_search(query, department=department)
-
-        if not results:
-            return ""
-
-        context_parts = ["## 参考信息:\n"]
-
-        for i, result in enumerate(results, 1):
-            source = result.get("source", "unknown")
-            if source == "knowledge_graph":
-                context_parts.append(
-                    f"{i}. [{result.get('type', 'knowledge')}] {result.get('name', '')}"
-                )
-                if result.get("description"):
-                    context_parts.append(f"   {result['description']}")
-            else:
-                context_parts.append(
-                    f"{i}. [文档] {result.get('content', '')[:200]}"
-                )
-
-        return "\n".join(context_parts)
+    @staticmethod
+    def _deduplicate(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        seen: set[str] = set()
+        unique: list[dict[str, Any]] = []
+        for item in items:
+            key = str(item.get("source_id") or item.get("content", "")[:160])
+            if key not in seen:
+                seen.add(key)
+                unique.append(item)
+        return unique
 
     def retrieve_and_build_context(
-        self,
-        query: str,
-        department: Optional[str] = None
+        self, query: str, department: Optional[str] = None
     ) -> Tuple[List[Dict[str, Any]], str]:
-        """
-        检索并构建上下文。
-
-        Args:
-            query: 查询文本
-            department: 科室
-
-        Returns:
-            (原始检索结果, 上下文字符串)
-        """
         results = self.hybrid_search(query, department=department)
-        context = self.build_context_from_results(results)
+        return results, self.build_context_from_results(results)
 
-        return results, context
+    def build_context(self, query: str, department: Optional[str] = None) -> str:
+        return self.retrieve_and_build_context(query, department)[1]
 
-    def build_context_from_results(
-        self,
-        results: List[Dict[str, Any]]
-    ) -> str:
-        """
-        从检索结果构建上下文字符串。
-
-        Args:
-            results: 检索结果
-
-        Returns:
-            上下文字符串
-        """
+    def build_context_from_results(self, results: List[Dict[str, Any]]) -> str:
         if not results:
             return ""
-
-        context_parts = ["## 参考信息:\n"]
-
-        for i, result in enumerate(results, 1):
-            source = result.get("source", "unknown")
-            if source == "knowledge_graph":
-                context_parts.append(
-                    f"{i}. [{result.get('type', 'knowledge')}] {result.get('name', '')}"
-                )
-                if result.get("description"):
-                    context_parts.append(f"   描述: {result['description']}")
-            else:
-                content = result.get("content", "")
-                context_parts.append(f"{i}. [文档] {content[:200]}")
-
-        return "\n".join(context_parts)
+        lines = ["## 可引用医疗证据（仅用于辅助回答）"]
+        for index, result in enumerate(results, start=1):
+            source_id = str(result.get("source_id") or f"S{index}")
+            content = str(result.get("content") or result.get("description") or result.get("name") or "")
+            path = result.get("path") or []
+            path_text = f"；路径：{' -> '.join(path)}" if path else ""
+            lines.append(f"[{source_id}] {content[:800]}{path_text}")
+        return "\n".join(lines)
 
 
-# 全局实例
 _medical_rag_service: MedicalRAGService | None = None
 
 
 def get_medical_rag_service() -> MedicalRAGService:
-    """获取MedicalRAG服务实例。"""
     global _medical_rag_service
     if _medical_rag_service is None:
         _medical_rag_service = MedicalRAGService()

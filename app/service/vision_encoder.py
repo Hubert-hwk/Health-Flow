@@ -1,21 +1,20 @@
-"""VisionEncoder Service - PDF/图像解析服务.
+"""PDF/image parsing with coordinate-aware metric extraction."""
 
-支持文本型PDF、扫描件PDF、以及纯图像报告的解析。
-"""
+from __future__ import annotations
 
+import base64
 import io
-from typing import List, Dict, Any, Optional, Tuple
+import json
 from dataclasses import dataclass
+from typing import Any, List, Optional, Tuple
 
-from app.model.llm import get_vlm_client, get_llm_client
+from app.model.llm import get_llm_client, get_vlm_client
 from app.schema.report import MetricRecord
 
 
 @dataclass
 class ParsedReport:
-    """解析后的报告。"""
-
-    report_type: str  # "text_pdf", "scanned_pdf", "image"
+    report_type: str
     raw_text: str
     metrics: List[MetricRecord]
     page_count: int
@@ -24,473 +23,285 @@ class ParsedReport:
 
 
 class VisionEncoderService:
-    """
-    视觉编码服务。
+    """Route text PDFs, scanned PDFs and images through the suitable parser."""
 
-    核心职责:
-    1. PDF类型检测（文本型 vs 扫描件）
-    2. 文本型PDF快速提取
-    3. 扫描件PDF渲染 + VLM解析
-    4. 图像报告VLM解析
-    """
-
-    def __init__(self):
+    def __init__(self) -> None:
         self._vlm_client = None
         self._llm_client = None
 
     @property
     def vlm_client(self):
-        """获取VLM客户端。"""
         if self._vlm_client is None:
             self._vlm_client = get_vlm_client()
         return self._vlm_client
 
     @property
     def llm_client(self):
-        """获取LLM客户端。"""
         if self._llm_client is None:
             self._llm_client = get_llm_client()
         return self._llm_client
 
     def detect_pdf_type(self, pdf_bytes: bytes) -> Tuple[str, int]:
-        """
-        检测PDF类型。
-
-        Args:
-            pdf_bytes: PDF文件字节
-
-        Returns:
-            (pdf类型, 页数)
-            类型: "text_pdf" 或 "scanned_pdf"
-        """
         try:
             import pdfplumber
 
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
                 page_count = len(pdf.pages)
-
-                # 检查前3页是否包含文本
-                text_pages = 0
-                for page in pdf.pages[:3]:
-                    text = page.extract_text()
-                    if text and len(text.strip()) > 50:
-                        text_pages += 1
-
-                # 如果超过一半的页面有文本，判定为文本型PDF
-                if text_pages >= 2:
-                    return "text_pdf", page_count
-                else:
-                    return "scanned_pdf", page_count
-
+                text_pages = sum(
+                    1
+                    for page in pdf.pages
+                    if (page.extract_text() or "").strip()
+                )
+                return ("text_pdf" if text_pages >= 1 else "scanned_pdf", page_count)
         except ImportError:
-            # pdfplumber不可用，假设为扫描件
-            return "scanned_pdf", 1
-        except Exception:
+            return "scanned_pdf", 0
+        except Exception as exc:
             return "unknown", 0
 
     def parse_text_pdf(self, pdf_bytes: bytes) -> ParsedReport:
-        """
-        解析文本型PDF。
-
-        Args:
-            pdf_bytes: PDF文件字节
-
-        Returns:
-            解析结果
-        """
         try:
             import pdfplumber
 
-            all_text = []
-            all_metrics = []
-
+            pages: list[str] = []
             with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+                page_count = len(pdf.pages)
                 for page in pdf.pages:
-                    # 提取文本
-                    text = page.extract_text()
-                    if text:
-                        all_text.append(text)
+                    text = page.extract_text() or ""
+                    tables = page.extract_tables() or []
+                    rows = [
+                        " | ".join(str(cell or "") for cell in row)
+                        for table in tables
+                        for row in table
+                        if row
+                    ]
+                    pages.append("\n".join(item for item in [text, *rows] if item))
 
-                    # 提取表格
-                    tables = page.extract_tables()
-                    for table in tables:
-                        for row in table:
-                            if row:
-                                row_text = " | ".join([str(cell) if cell else "" for cell in row])
-                                all_text.append(row_text)
-
-            # 合并所有文本
-            raw_text = "\n\n".join(all_text)
-
-            # 提取指标
-            metrics = self._extract_metrics_from_text(raw_text)
-
+            raw_text = "\n\n".join(page for page in pages if page)
             return ParsedReport(
                 report_type="text_pdf",
                 raw_text=raw_text,
-                metrics=metrics,
-                page_count=len(pdf.pages) if 'pdf' in locals() else 1,
-                success=True
+                metrics=self._extract_metrics_from_text(raw_text),
+                page_count=page_count,
+                success=True,
             )
-
-        except Exception as e:
-            return ParsedReport(
-                report_type="text_pdf",
-                raw_text="",
-                metrics=[],
-                page_count=0,
-                success=False,
-                error=str(e)
-            )
+        except Exception as exc:
+            return ParsedReport("text_pdf", "", [], 0, False, str(exc))
 
     def parse_scanned_pdf(self, pdf_bytes: bytes) -> ParsedReport:
-        """
-        解析扫描件PDF。
+        images = self._render_pdf_to_images(pdf_bytes)
+        if not images:
+            return ParsedReport("scanned_pdf", "", [], 0, False, "无法渲染 PDF 页面，请安装 PyMuPDF 和 Pillow")
 
-        将PDF页面渲染为图像，然后使用VLM解析。
+        metrics: list[MetricRecord] = []
+        texts: list[str] = []
+        errors: list[str] = []
+        for page_number, image_bytes in enumerate(images, start=1):
+            parsed = self._parse_image_with_vlm(image_bytes, "image/png", page_number)
+            texts.append(parsed[0])
+            metrics.extend(parsed[1])
+            if parsed[2]:
+                errors.append(f"page {page_number}: {parsed[2]}")
 
-        Args:
-            pdf_bytes: PDF文件字节
-
-        Returns:
-            解析结果
-        """
-        try:
-            from PIL import Image
-            import base64
-
-            # 渲染PDF页面
-            images = self._render_pdf_to_images(pdf_bytes)
-
-            if not images:
-                return ParsedReport(
-                    report_type="scanned_pdf",
-                    raw_text="",
-                    metrics=[],
-                    page_count=0,
-                    success=False,
-                    error="无法渲染PDF页面"
-                )
-
-            # 使用VLM解析每页
-            all_metrics = []
-            all_text_parts = []
-
-            for i, image_bytes in enumerate(images):
-                # 将图像转换为base64
-                image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-
-                # 构建VLM消息
-                messages = [{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/png;base64,{image_base64}"}
-                        },
-                        {
-                            "type": "text",
-                            "text": """请解析这张体检报告图像，提取所有医学指标。
-
-请以JSON格式输出:
-{
-    "text_summary": "页面内容的文字总结",
-    "metrics": [
-        {"metric_name": "指标名", "metric_value": "指标值", "unit": "单位", "reference_range": "参考范围"}
-    ]
-}
-
-只输出JSON，不要其他内容。"""
-                        }
-                    ]
-                }]
-
-                try:
-                    response = self.vlm_client.chat_with_image(messages)
-
-                    # 解析VLM响应
-                    import json
-                    if isinstance(response, str):
-                        # 尝试提取JSON
-                        start = response.find("{")
-                        end = response.rfind("}") + 1
-                        if start != -1 and end != 0:
-                            parsed = json.loads(response[start:end])
-                            all_text_parts.append(parsed.get("text_summary", ""))
-
-                            for m in parsed.get("metrics", []):
-                                all_metrics.append(MetricRecord(
-                                    metric_name=m.get("metric_name", ""),
-                                    metric_value=m.get("metric_value", ""),
-                                    unit=m.get("unit"),
-                                    reference_range=m.get("reference_range")
-                                ))
-                except Exception as e:
-                    all_text_parts.append(f"[第{i+1}页解析失败: {str(e)}]")
-
-            raw_text = "\n\n".join(all_text_parts)
-
-            return ParsedReport(
-                report_type="scanned_pdf",
-                raw_text=raw_text,
-                metrics=all_metrics,
-                page_count=len(images),
-                success=True
-            )
-
-        except Exception as e:
-            return ParsedReport(
-                report_type="scanned_pdf",
-                raw_text="",
-                metrics=[],
-                page_count=0,
-                success=False,
-                error=str(e)
-            )
+        return ParsedReport(
+            report_type="scanned_pdf",
+            raw_text="\n\n".join(texts),
+            metrics=metrics,
+            page_count=len(images),
+            success=bool(texts or metrics) and not errors,
+            error="; ".join(errors) if errors else None,
+        )
 
     def parse_image_report(self, image_bytes: bytes, mime_type: str = "image/png") -> ParsedReport:
-        """
-        解析图像型报告（直接上传的图片）。
-
-        Args:
-            image_bytes: 图像字节
-            mime_type: MIME类型
-
-        Returns:
-            解析结果
-        """
-        try:
-            import base64
-            import json
-
-            # 将图像转换为base64
-            image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-
-            # 确定data URL前缀
-            if mime_type == "image/jpeg":
-                data_prefix = "data:image/jpeg;base64,"
-            elif mime_type == "image/png":
-                data_prefix = "data:image/png;base64,"
-            else:
-                data_prefix = "data:image/png;base64,"
-
-            # 构建VLM消息
-            messages = [{
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"{data_prefix}{image_base64}"}
-                    },
-                    {
-                        "type": "text",
-                        "text": """请解析这张体检报告图像，提取所有医学指标。
-
-请以JSON格式输出:
-{
-    "text_summary": "图像内容的文字总结",
-    "metrics": [
-        {"metric_name": "指标名", "metric_value": "指标值", "unit": "单位", "reference_range": "参考范围"}
-    ]
-}
-
-只输出JSON，不要其他内容。"""
-                    }
-                ]
-            }]
-
-            response = self.vlm_client.chat_with_image(messages)
-
-            # 解析响应
-            if isinstance(response, str):
-                start = response.find("{")
-                end = response.rfind("}") + 1
-                if start != -1 and end != 0:
-                    parsed = json.loads(response[start:end])
-                    text_summary = parsed.get("text_summary", "")
-                    metrics_data = parsed.get("metrics", [])
-
-                    metrics = [
-                        MetricRecord(
-                            metric_name=m.get("metric_name", ""),
-                            metric_value=m.get("metric_value", ""),
-                            unit=m.get("unit"),
-                            reference_range=m.get("reference_range")
-                        )
-                        for m in metrics_data
-                    ]
-
-                    return ParsedReport(
-                        report_type="image",
-                        raw_text=text_summary,
-                        metrics=metrics,
-                        page_count=1,
-                        success=True
-                    )
-
-            return ParsedReport(
-                report_type="image",
-                raw_text=response if isinstance(response, str) else "",
-                metrics=[],
-                page_count=1,
-                success=True
-            )
-
-        except Exception as e:
-            return ParsedReport(
-                report_type="image",
-                raw_text="",
-                metrics=[],
-                page_count=1,
-                success=False,
-                error=str(e)
-            )
+        text, metrics, error = self._parse_image_with_vlm(image_bytes, mime_type, 1)
+        return ParsedReport("image", text, metrics, 1, error is None, error)
 
     def parse(self, content: bytes, filename: str) -> ParsedReport:
-        """
-        统一解析入口。
-
-        根据文件类型自动选择解析方法。
-
-        Args:
-            content: 文件字节
-            filename: 文件名
-
-        Returns:
-            解析结果
-        """
-        filename_lower = filename.lower()
-
-        # 根据扩展名判断类型
-        if filename_lower.endswith(".pdf"):
+        lower = filename.lower()
+        if lower.endswith(".pdf"):
             pdf_type, _ = self.detect_pdf_type(content)
-            if pdf_type == "text_pdf":
-                return self.parse_text_pdf(content)
-            else:
-                return self.parse_scanned_pdf(content)
+            return self.parse_text_pdf(content) if pdf_type == "text_pdf" else self.parse_scanned_pdf(content)
+        if lower.endswith((".jpg", ".jpeg", ".png", ".gif", ".bmp")):
+            return self.parse_image_report(content, self._get_mime_type(lower))
+        return ParsedReport("unknown", "", [], 0, False, f"不支持的文件类型：{filename}")
 
-        elif filename_lower.endswith((".jpg", ".jpeg", ".png", ".gif", ".bmp")):
-            return self.parse_image_report(content, self._get_mime_type(filename_lower))
+    def _parse_image_with_vlm(
+        self, image_bytes: bytes, mime_type: str, page_number: int
+    ) -> tuple[str, list[MetricRecord], Optional[str]]:
+        image_base64 = base64.b64encode(image_bytes).decode("ascii")
+        width, height = self._image_size(image_bytes)
+        prompt = """
+解析体检报告页面，输出严格 JSON，不要输出 Markdown。必须尽量保留版面证据。
+每个 metric 必须包含 metric_name、metric_value；如果能定位，请返回页面像素坐标 bbox
+[x1,y1,x2,y2]、归一化坐标 bbox_normalized [0,0,1000,1000]、evidence_text。
+JSON 格式：
+{"text_summary":"页面摘要","metrics":[
+ {"metric_name":"空腹血糖","metric_value":"6.5","unit":"mmol/L",
+  "reference_range":"3.9-6.1","abnormal_flag":"H","bbox":[0,0,0,0],
+  "bbox_normalized":[0,0,0,0],"evidence_text":"原文片段"}
+]}
+无法确认的坐标返回 null，禁止猜测坐标。
+""".strip()
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_base64}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }
+        ]
+        try:
+            response = self.vlm_client.chat_with_image(messages)
+            payload = self._parse_json_response(response)
+            metrics = [
+                self._metric_from_payload(item, page_number, width, height, index)
+                for index, item in enumerate(payload.get("metrics", []), start=1)
+            ]
+            return str(payload.get("text_summary", "")), [item for item in metrics if item], None
+        except Exception as exc:
+            return "", [], str(exc)
 
-        else:
-            return ParsedReport(
-                report_type="unknown",
-                raw_text="",
-                metrics=[],
-                page_count=0,
-                success=False,
-                error=f"不支持的文件类型: {filename}"
-            )
+    def _metric_from_payload(
+        self,
+        data: dict[str, Any],
+        page_number: int,
+        width: Optional[int],
+        height: Optional[int],
+        index: int,
+    ) -> Optional[MetricRecord]:
+        name = str(data.get("metric_name", "")).strip()
+        value = str(data.get("metric_value", "")).strip()
+        if not name or not value:
+            return None
 
-    def _render_pdf_to_images(self, pdf_bytes: bytes, dpi: int = 72) -> List[bytes]:
-        """
-        将PDF页面渲染为图像。
+        bbox = self._clean_bbox(data.get("bbox"))
+        normalized = self._clean_bbox(data.get("bbox_normalized"))
+        if normalized is None and bbox and width and height:
+            normalized = self.normalize_bbox(bbox, width, height)
+        if bbox is None and normalized and width and height:
+            bbox = self.denormalize_bbox(normalized, width, height)
 
-        Args:
-            pdf_bytes: PDF字节
-            dpi: 渲染DPI
+        return MetricRecord(
+            metric_name=name,
+            metric_value=value,
+            unit=data.get("unit"),
+            reference_range=data.get("reference_range"),
+            trend=data.get("trend"),
+            abnormal_flag=data.get("abnormal_flag"),
+            bbox=bbox,
+            bbox_normalized=normalized,
+            page_number=page_number,
+            evidence_text=data.get("evidence_text"),
+            source_id=str(data.get("source_id") or f"p{page_number}-m{index}"),
+        )
 
-        Returns:
-            图像字节列表
-        """
+    @staticmethod
+    def _clean_bbox(value: Any) -> Optional[list[float]]:
+        if not isinstance(value, (list, tuple)) or len(value) != 4:
+            return None
+        try:
+            values = [float(item) for item in value]
+        except (TypeError, ValueError):
+            return None
+        x1, y1, x2, y2 = values
+        if x2 < x1 or y2 < y1:
+            return None
+        return values
+
+    @staticmethod
+    def normalize_bbox(bbox: list[float], width: int, height: int) -> list[float]:
+        if width <= 0 or height <= 0:
+            return [0.0, 0.0, 0.0, 0.0]
+        x1, y1, x2, y2 = bbox
+        return [
+            round(max(0.0, min(1000.0, x1 / width * 1000)), 2),
+            round(max(0.0, min(1000.0, y1 / height * 1000)), 2),
+            round(max(0.0, min(1000.0, x2 / width * 1000)), 2),
+            round(max(0.0, min(1000.0, y2 / height * 1000)), 2),
+        ]
+
+    @staticmethod
+    def denormalize_bbox(bbox: list[float], width: int, height: int) -> list[float]:
+        x1, y1, x2, y2 = bbox
+        return [x1 / 1000 * width, y1 / 1000 * height, x2 / 1000 * width, y2 / 1000 * height]
+
+    @staticmethod
+    def _parse_json_response(response: Any) -> dict[str, Any]:
+        if isinstance(response, dict):
+            return response
+        text = str(response or "").strip().replace("```json", "").replace("```", "")
+        start, end = text.find("{"), text.rfind("}")
+        if start < 0 or end <= start:
+            raise ValueError("VLM 未返回 JSON")
+        payload = json.loads(text[start : end + 1])
+        if not isinstance(payload, dict):
+            raise ValueError("VLM JSON 顶层不是对象")
+        return payload
+
+    @staticmethod
+    def _image_size(image_bytes: bytes) -> tuple[Optional[int], Optional[int]]:
         try:
             from PIL import Image
-            import fitz  # pymupdf
 
-            images = []
-            doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+            with Image.open(io.BytesIO(image_bytes)) as image:
+                return image.width, image.height
+        except Exception:
+            return None, None
 
-            for page in doc:
-                # 渲染页面
-                mat = fitz.Matrix(dpi / 72, dpi / 72)
-                pix = page.get_pixmap(matrix=mat)
+    def _render_pdf_to_images(self, pdf_bytes: bytes, dpi: int = 144) -> List[bytes]:
+        try:
+            import fitz
 
-                # 转换为PNG
-                img_bytes = pix.tobytes("png")
-                images.append(img_bytes)
-
-            doc.close()
+            document = fitz.open(stream=pdf_bytes, filetype="pdf")
+            matrix = fitz.Matrix(dpi / 72, dpi / 72)
+            images = [page.get_pixmap(matrix=matrix).tobytes("png") for page in document]
+            document.close()
             return images
-
-        except ImportError:
-            # pymupdf不可用
-            return []
         except Exception:
             return []
 
-    def _get_mime_type(self, filename: str) -> str:
-        """获取MIME类型。"""
-        mime_types = {
+    @staticmethod
+    def _get_mime_type(filename: str) -> str:
+        return {
             ".jpg": "image/jpeg",
             ".jpeg": "image/jpeg",
             ".png": "image/png",
             ".gif": "image/gif",
-            ".bmp": "image/bmp"
-        }
-        for ext, mime in mime_types.items():
-            if filename.endswith(ext):
-                return mime
-        return "image/png"
+            ".bmp": "image/bmp",
+        }.get(next((ext for ext in (".jpg", ".jpeg", ".png", ".gif", ".bmp") if filename.endswith(ext)), ".png"), "image/png")
 
     def _extract_metrics_from_text(self, text: str) -> List[MetricRecord]:
-        """
-        从文本中提取指标。
-
-        使用LLM进行结构化提取。
-
-        Args:
-            text: 文本内容
-
-        Returns:
-            指标列表
-        """
-        prompt = f"""从以下体检报告文本中提取所有医学指标。
-
-文本:
-{text[:3000]}
-
-请以JSON格式输出:
-{{
-    "metrics": [
-        {{"metric_name": "指标名", "metric_value": "指标值", "unit": "单位", "reference_range": "参考范围"}}
-    ]
-}}
-
-如果没有找到指标，返回空数组: {{"metrics": []}}
-只输出JSON。"""
-
+        if not text.strip():
+            return []
+        prompt = (
+            "从体检报告文本中提取医学指标，只输出 JSON："
+            '{"metrics":[{"metric_name":"","metric_value":"","unit":"",'
+            '"reference_range":"","abnormal_flag":"","evidence_text":""}]}\n'
+            f"文本：{text[:12000]}"
+        )
         try:
-            response = self.llm_client.chat_with_json(
+            result = self.llm_client.chat_with_json(
                 messages=[
-                    {"role": "system", "content": "你是一个医疗指标提取助手。"},
-                    {"role": "user", "content": prompt}
-                ]
+                    {"role": "system", "content": "你是医疗报告结构化抽取器，不做诊断。"},
+                    {"role": "user", "content": prompt},
+                ],
+                json_schema={"type": "object"},
             )
-
-            if isinstance(response, dict):
-                metrics_data = response.get("metrics", [])
-                return [
-                    MetricRecord(
-                        metric_name=m.get("metric_name", ""),
-                        metric_value=m.get("metric_value", ""),
-                        unit=m.get("unit"),
-                        reference_range=m.get("reference_range")
-                    )
-                    for m in metrics_data
-                ]
-
+            values = result.get("metrics", []) if isinstance(result, dict) else []
+            records: list[MetricRecord] = []
+            for index, item in enumerate(values, start=1):
+                metric = self._metric_from_payload(item, 1, None, None, index)
+                if metric:
+                    records.append(metric)
+            return records
         except Exception:
-            pass
-
-        return []
+            return []
 
 
-# 全局实例
 _vision_encoder_service: VisionEncoderService | None = None
 
 
 def get_vision_encoder_service() -> VisionEncoderService:
-    """获取VisionEncoder服务实例。"""
     global _vision_encoder_service
     if _vision_encoder_service is None:
         _vision_encoder_service = VisionEncoderService()

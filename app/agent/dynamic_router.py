@@ -1,18 +1,39 @@
-"""LangGraph DynamicRouter Agent.
+"""Triage controller for routing medical-assistance requests."""
 
-基于意图先验分布的动态路由算法，实现不同专科Agent的精准分发。
-"""
+from __future__ import annotations
 
-from typing import TypedDict, List, Dict, Any, Optional
-from langgraph.graph import StateGraph, END
+from typing import Any, Dict, List, Optional, TypedDict
 
-from app.model.llm import get_llm_client
+from langgraph.graph import END, StateGraph
+
+from app.config import get_settings
 from app.data.neo4j_client import get_neo4j_client
+from app.model.llm import get_llm_client
+
+
+DEPARTMENTS = ("内分泌科", "心内科", "消化科", "呼吸科", "全科")
+DEPT_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "内分泌科": ("血糖", "糖尿病", "甲状腺", "代谢", "胰岛素", "糖化血红蛋白", "尿酸"),
+    "心内科": ("血压", "心脏", "血脂", "冠心病", "心电图", "心率", "心肌", "胸痛"),
+    "消化科": ("胃", "肠", "胃肠", "肝", "胆", "腹痛", "腹泻", "便秘", "消化", "胰腺"),
+    "呼吸科": ("咳嗽", "咽痛", "肺", "气管", "呼吸", "胸闷", "气短", "流感"),
+    "全科": ("体检", "健康", "咨询", "报告", "建议", "异常", "怎么办"),
+}
+DEPARTMENT_ALIASES = {
+    "endocrinology": "内分泌科",
+    "cardiology": "心内科",
+    "gastroenterology": "消化科",
+    "respiratory": "呼吸科",
+    "general": "全科",
+    "内分泌": "内分泌科",
+    "心血管": "心内科",
+    "消化内科": "消化科",
+    "呼吸内科": "呼吸科",
+}
+HIGH_RISK_TERMS = ("危急值", "胸痛", "呼吸困难", "意识不清", "昏厥", "大出血")
 
 
 class RouterState(TypedDict):
-    """Router agent state."""
-
     user_query: str
     patient_id: Optional[str]
     intent_distribution: Dict[str, float]
@@ -20,177 +41,129 @@ class RouterState(TypedDict):
     reasoning: str
     confidence: float
     related_symptoms: List[Dict[str, Any]]
+    low_confidence: bool
+    human_review_required: bool
+    risk_level: str
+    specialist_skills: List[str]
 
 
-# 科室关键词映射
-DEPT_KEYWORDS = {
-    "内分泌科": ["血糖", "甲状腺", "代谢", "糖尿病", "甲亢", "甲减", "激素", "空腹", "餐后", "糖化血红蛋白"],
-    "心内科": ["血压", "心脏", "血脂", "冠心病", "心电图", "心率", "心肌", "心衰", "动脉", "支架"],
-    "消化科": ["胃肠", "肝胆", "胃痛", "腹胀", "腹泻", "便秘", "消化", "肝脏", "胆囊", "胰腺"],
-    "呼吸科": ["咳嗽", "哮喘", "肺炎", "支气管", "肺", "呼吸道", "胸闷", "气短", "流感", "新冠"],
-    "全科": ["体检", "健康", "咨询", "建议", "一般", "普通"]
-}
+def _normalise_distribution(values: Dict[str, Any]) -> Dict[str, float]:
+    clean = {dept: 0.0 for dept in DEPARTMENTS}
+    for key, value in values.items():
+        department = DEPARTMENT_ALIASES.get(str(key), str(key))
+        if department not in clean:
+            continue
+        try:
+            clean[department] = max(0.0, float(value))
+        except (TypeError, ValueError):
+            continue
+    total = sum(clean.values())
+    if total <= 0:
+        return {dept: (1.0 if dept == "全科" else 0.0) for dept in DEPARTMENTS}
+    return {dept: score / total for dept, score in clean.items()}
+
+
+def _keyword_distribution(query: str) -> Dict[str, float]:
+    scores = {dept: 0.0 for dept in DEPARTMENTS}
+    for department, keywords in DEPT_KEYWORDS.items():
+        scores[department] = float(sum(query.count(keyword) for keyword in keywords))
+    if sum(scores.values()) == 0:
+        scores["全科"] = 1.0
+    return _normalise_distribution(scores)
+
+
+def _llm_distribution(query: str) -> Optional[Dict[str, float]]:
+    prompt = (
+        "将用户医疗辅助问题路由到一个或多个科室。只输出 JSON，键可使用 "
+        "endocrinology/cardiology/gastroenterology/respiratory/general，值为 0 到 1 的概率。\n"
+        f"用户问题：{query}"
+    )
+    try:
+        response = get_llm_client().chat_with_json(
+            messages=[
+                {"role": "system", "content": "你是医疗分诊控制器，不做诊断。"},
+                {"role": "user", "content": prompt},
+            ],
+            json_schema={"type": "object"},
+        )
+        if isinstance(response, dict):
+            return _normalise_distribution(response)
+    except Exception:
+        return None
+    return None
 
 
 def calculate_intent_distribution(state: RouterState) -> RouterState:
-    """
-    计算意图分布。
-
-    基于关键词匹配和LLM推理，计算用户query属于各科室的概率分布。
-    """
     query = state["user_query"]
-    llm_client = get_llm_client()
+    keyword_dist = _keyword_distribution(query)
+    keyword_hits = sum(query.count(keyword) for words in DEPT_KEYWORDS.values() for keyword in words)
 
-    # 1. 关键词初步匹配
-    keyword_scores = {}
-    for dept, keywords in DEPT_KEYWORDS.items():
-        score = sum(1 for kw in keywords if kw in query)
-        keyword_scores[dept] = score
-
-    # 2. 如果有关键词匹配，使用关键词得分
-    if sum(keyword_scores.values()) > 0:
-        total = sum(keyword_scores.values())
-        intent_dist = {dept: score / total for dept, score in keyword_scores.items()}
-    else:
-        # 3. 无关键词匹配时，使用LLM推理
-        prompt = f"""根据用户query，判断其最可能属于哪个医疗科室。
-
-用户query: {query}
-
-可选科室: 内分泌科, 心内科, 消化科, 呼吸科, 全科
-
-请以JSON格式输出，格式如下:
-{{
-    "内分泌科": 0.x,
-    "心内科": 0.x,
-    "消化科": 0.x,
-    "呼吸科": 0.x,
-    "全科": 0.x
-}}
-确保概率之和为1.0。"""
-
-        try:
-            response = llm_client.chat_with_json(
-                messages=[
-                    {"role": "system", "content": "你是一个医疗科室分类助手。"},
-                    {"role": "user", "content": prompt}
-                ]
-            )
-            # 解析LLM返回的JSON
-            if isinstance(response, dict):
-                # 确保所有科室都存在
-                for dept in DEPT_KEYWORDS.keys():
-                    if dept not in response:
-                        response[dept] = 0.0
-                intent_dist = response
-            else:
-                intent_dist = {dept: 0.2 for dept in DEPT_KEYWORDS.keys()}
-        except Exception:
-            intent_dist = {dept: 0.2 for dept in DEPT_KEYWORDS.keys()}
-
-    # 4. 更新状态
-    state["intent_distribution"] = intent_dist
+    # Keyword evidence is deterministic and preferred for explicit medical terms.
+    # LLM classification is used only for ambiguous queries.
+    distribution = keyword_dist if keyword_hits else (_llm_distribution(query) or keyword_dist)
+    state["intent_distribution"] = distribution
     return state
 
 
 def generate_reasoning(state: RouterState) -> RouterState:
-    """
-    生成路由推理过程。
+    distribution = _normalise_distribution(state["intent_distribution"])
+    ranked = sorted(distribution.items(), key=lambda item: item[1], reverse=True)
+    department, confidence = ranked[0]
+    threshold = get_settings().ROUTER_CONFIDENCE_THRESHOLD
+    margin = confidence - ranked[1][1] if len(ranked) > 1 else confidence
+    risk = "high" if any(term in state["user_query"] for term in HIGH_RISK_TERMS) else "normal"
+    low_confidence = confidence < threshold or margin < 0.15
+    human_review = low_confidence or risk == "high"
 
-    基于意图分布，生成推理说明并确定最终路由科室。
-    """
-    intent_dist = state["intent_distribution"]
+    reasons = [f"分析结果：主路由为 {department}（置信度 {confidence:.1%}）"]
+    if low_confidence:
+        reasons.append("置信度或主次科室差值不足，建议人工复核")
+    if risk == "high":
+        reasons.append("检测到潜在高风险词，优先人工/急诊分流")
 
-    # 找出概率最高的科室
-    routed_dept = max(intent_dist, key=intent_dist.get)
-    confidence = intent_dist[routed_dept]
-
-    # 生成推理说明
-    sorted_intents = sorted(intent_dist.items(), key=lambda x: x[1], reverse=True)
-    reasoning_parts = [f"根据分析，您的症状最可能涉及以下科室："]
-    for dept, prob in sorted_intents:
-        if prob > 0.05:
-            reasoning_parts.append(f"- {dept}: {prob:.1%}")
-
-    state["routed_department"] = routed_dept
+    state["intent_distribution"] = distribution
+    state["routed_department"] = department if not (risk == "high" and low_confidence) else "全科"
     state["confidence"] = confidence
-    state["reasoning"] = "\n".join(reasoning_parts)
-
+    state["reasoning"] = "；".join(reasons)
+    state["low_confidence"] = low_confidence
+    state["human_review_required"] = human_review
+    state["risk_level"] = risk
+    state["specialist_skills"] = [f"{department}报告解读", "证据引用", "医疗安全校验"]
     return state
 
 
 def query_knowledge_graph(state: RouterState) -> RouterState:
-    """
-    查询知识图谱，获取相关症状信息。
-
-    根据路由科室，查询相关症状和疾病信息。
-    """
-    neo4j_client = get_neo4j_client()
-    routed_dept = state["routed_department"]
-
-    # 根据科室查询相关症状
+    """Attach optional graph hints without making routing depend on Neo4j."""
+    client = get_neo4j_client()
+    symptoms: list[dict[str, Any]] = []
     try:
-        # 查询该科室的常见症状
-        query = """
-        MATCH (d:Department {name: $dept})<-[:BELONGS_TO]-(s:Symptom)
-        RETURN s.name AS symptom, s.description AS description
-        LIMIT 10
-        """
-        with neo4j_client.driver.session(database=neo4j_client.database) as session:
-            result = session.run(query, dept=routed_dept)
-            symptoms = [{"name": r["symptom"], "description": r["description"]} for r in result]
+        # The graph client owns Cypher and can return an empty list when the
+        # optional service is unavailable.  The router remains usable.
+        for entity in (state["routed_department"], state["user_query"]):
+            for item in client.query_by_entity(entity, limit=5):
+                symptoms.append(item)
     except Exception:
         symptoms = []
-
-    state["related_symptoms"] = symptoms
+    state["related_symptoms"] = symptoms[:10]
     return state
 
 
-def create_router_graph() -> StateGraph:
-    """
-    创建动态路由图。
-
-    流程:
-    1. 计算意图分布
-    2. 生成推理说明
-    3. 查询知识图谱
-    4. 返回路由结果
-    """
-    # 定义节点
-    nodes = {
-        "calculate_intent": calculate_intent_distribution,
-        "generate_reasoning": generate_reasoning,
-        "query_kg": query_knowledge_graph,
-    }
-
-    # 定义边
-    edges = [
-        ("calculate_intent", "generate_reasoning"),
-        ("generate_reasoning", "query_kg"),
-        ("query_kg", END),
-    ]
-
-    # 创建图
+def create_router_graph():
     graph = StateGraph(RouterState)
-    for name, func in nodes.items():
-        graph.add_node(name, func)
-
-    # 添加边
-    for from_node, to_node in edges:
-        graph.add_edge(from_node, to_node)
-
-    # 设置入口点
+    graph.add_node("calculate_intent", calculate_intent_distribution)
+    graph.add_node("generate_reasoning", generate_reasoning)
+    graph.add_node("query_kg", query_knowledge_graph)
+    graph.add_edge("calculate_intent", "generate_reasoning")
+    graph.add_edge("generate_reasoning", "query_kg")
+    graph.add_edge("query_kg", END)
     graph.set_entry_point("calculate_intent")
-
     return graph.compile()
 
 
-# 全局路由器实例
 _router_graph = None
 
 
-def get_router_graph() -> StateGraph:
-    """获取路由器图实例。"""
+def get_router_graph():
     global _router_graph
     if _router_graph is None:
         _router_graph = create_router_graph()
@@ -198,18 +171,6 @@ def get_router_graph() -> StateGraph:
 
 
 def route(user_query: str, patient_id: Optional[str] = None) -> Dict[str, Any]:
-    """
-    执行路由。
-
-    Args:
-        user_query: 用户query
-        patient_id: 患者ID
-
-    Returns:
-        路由结果，包含意图分布、路由科室、推理说明等
-    """
-    graph = get_router_graph()
-
     initial_state: RouterState = {
         "user_query": user_query,
         "patient_id": patient_id,
@@ -218,14 +179,23 @@ def route(user_query: str, patient_id: Optional[str] = None) -> Dict[str, Any]:
         "reasoning": "",
         "confidence": 0.0,
         "related_symptoms": [],
+        "low_confidence": False,
+        "human_review_required": False,
+        "risk_level": "normal",
+        "specialist_skills": [],
     }
-
-    result = graph.invoke(initial_state)
-
+    result = get_router_graph().invoke(initial_state)
     return {
-        "routed_department": result["routed_department"],
-        "intent_distribution": result["intent_distribution"],
-        "confidence": result["confidence"],
-        "reasoning": result["reasoning"],
-        "related_symptoms": result["related_symptoms"],
+        key: result.get(key)
+        for key in (
+            "routed_department",
+            "intent_distribution",
+            "confidence",
+            "reasoning",
+            "related_symptoms",
+            "low_confidence",
+            "human_review_required",
+            "risk_level",
+            "specialist_skills",
+        )
     }

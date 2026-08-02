@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" role="img" aria-labelledby="title desc">
+  <title id="title">HealthFlow animated pipeline</title>
+  <desc id="desc">Animated flow from a medical report through parsing, routing, retrieval, specialist reasoning and safety validation.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1">
+      <stop offset="0" stop-color="#081426"/>
+      <stop offset="1" stop-color="#102b3b"/>
+    </linearGradient>
+    <linearGradient id="line" x1="0" x2="1">
+      <stop offset="0" stop-color="#63e6be"/>
+      <stop offset="1" stop-color="#6ea8fe"/>
+    </linearGradient>
+    <filter id="shadow" x="-30%" y="-30%" width="160%" height="160%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#020617" flood-opacity="0.35"/>
+    </filter>
+  </defs>
+  <rect width="1200" height="340" rx="24" fill="url(#bg)"/>
+  <text x="600" y="44" text-anchor="middle" fill="#f8fafc" font-family="Segoe UI, Arial, sans-serif" font-size="22" font-weight="700">A query becomes an evidence-backed, safety-checked response</text>
+  <path d="M150 170 H1050" fill="none" stroke="#2b5062" stroke-width="5" stroke-linecap="round"/>
+  <path d="M150 170 H1050" fill="none" stroke="url(#line)" stroke-width="2" stroke-linecap="round" stroke-dasharray="12 14" opacity="0.85"/>
+
+  <g font-family="Segoe UI, Arial, sans-serif" text-anchor="middle" filter="url(#shadow)">
+    <g transform="translate(96 104)">
+      <rect width="108" height="132" rx="18" fill="#10283b" stroke="#63e6be" stroke-opacity="0.7"/>
+      <text x="54" y="46" fill="#63e6be" font-size="28">▣</text>
+      <text x="54" y="82" fill="#f8fafc" font-size="15" font-weight="700">REPORT</text>
+      <text x="54" y="104" fill="#9fc3d1" font-size="12">PDF / image</text>
+    </g>
+    <g transform="translate(300 104)">
+      <rect width="108" height="132" rx="18" fill="#10283b" stroke="#6ea8fe" stroke-opacity="0.7"/>
+      <text x="54" y="46" fill="#6ea8fe" font-size="28">⌗</text>
+      <text x="54" y="82" fill="#f8fafc" font-size="15" font-weight="700">PARSE</text>
+      <text x="54" y="104" fill="#9fc3d1" font-size="12">BBOX + evidence</text>
+    </g>
+    <g transform="translate(504 104)">
+      <rect width="108" height="132" rx="18" fill="#10283b" stroke="#63e6be" stroke-opacity="0.7"/>
+      <text x="54" y="46" fill="#63e6be" font-size="28">⇄</text>
+      <text x="54" y="82" fill="#f8fafc" font-size="15" font-weight="700">ROUTE</text>
+      <text x="54" y="104" fill="#9fc3d1" font-size="12">department</text>
+    </g>
+    <g transform="translate(708 104)">
+      <rect width="108" height="132" rx="18" fill="#10283b" stroke="#6ea8fe" stroke-opacity="0.7"/>
+      <text x="54" y="46" fill="#6ea8fe" font-size="28">◇</text>
+      <text x="54" y="82" fill="#f8fafc" font-size="15" font-weight="700">RETRIEVE</text>
+      <text x="54" y="104" fill="#9fc3d1" font-size="12">Vector + graph</text>
+    </g>
+    <g transform="translate(912 104)">
+      <rect width="108" height="132" rx="18" fill="#10283b" stroke="#63e6be" stroke-opacity="0.7"/>
+      <text x="54" y="46" fill="#63e6be" font-size="28">✓</text>
+      <text x="54" y="82" fill="#f8fafc" font-size="15" font-weight="700">VALIDATE</text>
+      <text x="54" y="104" fill="#9fc3d1" font-size="12">Safety + source</text>
+    </g>
+  </g>
+
+  <g fill="#d7f9f1">
+    <circle r="6">
+      <animateMotion dur="3.8s" repeatCount="indefinite" path="M150 170 H1050"/>
+    </circle>
+    <circle r="4" opacity="0.65">
+      <animateMotion dur="3.8s" begin="1.2s" repeatCount="indefinite" path="M150 170 H1050"/>
+    </circle>
+  </g>
+  <text x="600" y="292" text-anchor="middle" fill="#9fc3d1" font-family="Segoe UI, Arial, sans-serif" font-size="14">LangGraph StateGraph  ·  bounded Self-Correction  ·  human-review fallback for high-risk cases</text>
+</svg>

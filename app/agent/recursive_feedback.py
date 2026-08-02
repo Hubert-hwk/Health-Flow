@@ -1,17 +1,16 @@
-"""LangGraph RecursiveFeedback Agent.
+"""Evidence-aware Self-Correction for multi-turn medical assistance."""
 
-递归式反馈机制，对多轮问诊进行逻辑一致性校验，提升长上下文推演的输出稳定性。
-"""
+from __future__ import annotations
 
-from typing import TypedDict, List, Dict, Any, Optional
-from langgraph.graph import StateGraph, END
+import re
+from typing import Any, Dict, List, Optional, TypedDict
+
+from langgraph.graph import END, StateGraph
 
 from app.model.llm import get_llm_client
 
 
 class FeedbackState(TypedDict):
-    """Feedback agent state."""
-
     original_response: str
     conversation_history: List[Dict[str, str]]
     current_response: str
@@ -20,243 +19,158 @@ class FeedbackState(TypedDict):
     max_recursion: int
     is_consistent: bool
     refined_response: str
+    evidence: List[Dict[str, Any]]
+    evidence_score: Optional[float]
 
 
-# 医疗一致性规则
 CONSISTENCY_RULES = [
-    {
-        "type": "value_contradiction",
-        "description": "同一指标前后描述不一致",
-        "example": "前轮说血糖正常，后轮说血糖偏高"
-    },
-    {
-        "type": "range_contradiction",
-        "description": "指标值超出合理区间",
-        "example": "血糖值为-5.0"
-    },
-    {
-        "type": "logic_contradiction",
-        "description": "因果关系颠倒或冲突",
-        "example": "先说需要用药，后说无需治疗"
-    }
+    {"type": "value_contradiction", "description": "同一指标前后数值不一致", "example": "血糖 6.5 与血糖 5.2"},
+    {"type": "range_contradiction", "description": "指标数值与异常判断不一致", "example": "同一指标同时被判断正常和偏高"},
+    {"type": "logic_contradiction", "description": "结论或条件前后冲突", "example": "同时建议无需就医和立即就医"},
 ]
 
 
-def detect_contradictions(state: FeedbackState) -> FeedbackState:
-    """
-    检测当前回答与历史上下文的矛盾。
+def _numeric_claims(text: str) -> dict[str, str]:
+    pattern = re.compile(
+        r"(?P<name>[\u4e00-\u9fffA-Za-z][\u4e00-\u9fffA-Za-z0-9_%()\-]{1,20})"
+        r"[^\d\-]{0,8}(?P<value>-?\d+(?:\.\d+)?)"
+    )
+    return {match.group("name"): match.group("value") for match in pattern.finditer(text)}
 
-    使用LLM分析是否存在逻辑矛盾。
-    """
-    llm_client = get_llm_client()
-    current_response = state["current_response"]
+
+def _evidence_score(response: str, evidence: List[Dict[str, Any]]) -> Optional[float]:
+    if not evidence:
+        return None
+    source_ids = [str(item.get("source_id", "")) for item in evidence if item.get("source_id")]
+    if not source_ids:
+        return 0.0
+    cited = sum(1 for source_id in source_ids if f"[{source_id}]" in response or source_id in response)
+    return min(1.0, cited / max(1, len(set(source_ids))))
+
+
+def _deterministic_contradictions(state: FeedbackState) -> list[str]:
     history = state["conversation_history"]
+    current = state["current_response"]
+    previous = "\n".join(
+        item.get("content", "")
+        for item in history[-8:]
+        if item.get("role") == "assistant"
+    )
+    if not previous:
+        return []
 
-    if not history:
-        state["contradictions"] = []
-        state["is_consistent"] = True
-        return state
+    contradictions: list[str] = []
+    previous_claims = _numeric_claims(previous)
+    current_claims = _numeric_claims(current)
+    for name, old_value in previous_claims.items():
+        new_value = current_claims.get(name)
+        if new_value is not None and new_value != old_value:
+            contradictions.append(f"指标 {name} 的历史值 {old_value} 与当前值 {new_value} 不一致")
 
-    # 构建历史对话摘要
-    history_summary = "\n".join([
-        f"{msg['role']}: {msg['content']}"
-        for msg in history[-5:]  # 只看最近5轮
-    ])
+    for name in set(previous_claims) & set(current_claims):
+        window = current[max(0, current.find(name) - 20) : current.find(name) + 80]
+        if ("正常" in window and any(word in window for word in ("偏高", "偏低", "异常"))) or (
+            "无需就医" in window and "尽快就医" in window
+        ):
+            contradictions.append(f"指标 {name} 的当前结论包含相互冲突的判断")
+    return contradictions
 
-    # LLM判断是否存在矛盾
-    prompt = f"""请分析当前回答与历史对话是否存在矛盾。
 
-历史对话:
-{history_summary}
+def detect_contradictions(state: FeedbackState) -> FeedbackState:
+    contradictions = _deterministic_contradictions(state)
+    # Ask the model only after deterministic checks.  The model is an auxiliary
+    # reviewer; a timeout or malformed response must not erase hard conflicts.
+    if not contradictions and state["conversation_history"]:
+        try:
+            history = "\n".join(
+                f"{item.get('role')}: {item.get('content', '')}"
+                for item in state["conversation_history"][-5:]
+            )
+            result = get_llm_client().chat_with_json(
+                messages=[
+                    {"role": "system", "content": "你是医疗回答的一致性审查器，不做诊断。"},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"历史对话：\n{history}\n\n当前回答：\n{state['current_response']}\n"
+                            "只输出 JSON：{\"has_contradiction\": false, \"contradictions\": []}"
+                        ),
+                    },
+                ],
+                json_schema={"type": "object"},
+            )
+            if isinstance(result, dict) and result.get("has_contradiction"):
+                contradictions.extend(str(item) for item in result.get("contradictions", []))
+        except Exception:
+            pass
 
-当前回答:
-{current_response}
-
-请以JSON格式输出:
-{{
-    "has_contradiction": true/false,
-    "contradictions": [
-        "矛盾1的具体描述",
-        "矛盾2的具体描述"
-    ],
-    "reasoning": "判断理由"
-}}
-"""
-
-    try:
-        response = llm_client.chat_with_json(
-            messages=[
-                {"role": "system", "content": "你是一个医疗一致性分析助手。"},
-                {"role": "user", "content": prompt}
-            ]
-        )
-
-        if isinstance(response, dict):
-            state["is_consistent"] = not response.get("has_contradiction", False)
-            state["contradictions"] = response.get("contradictions", [])
-        else:
-            state["is_consistent"] = True
-            state["contradictions"] = []
-
-    except Exception:
-        state["is_consistent"] = True
-        state["contradictions"] = []
-
+    state["contradictions"] = contradictions[:5]
+    state["is_consistent"] = not state["contradictions"]
+    state["evidence_score"] = _evidence_score(state["current_response"], state.get("evidence", []))
     return state
 
 
 def refine_response(state: FeedbackState) -> FeedbackState:
-    """
-    当检测到矛盾时，触发修正流程。
-
-    重新检索信息，生成修正后的回答。
-    """
-    llm_client = get_llm_client()
-    current_response = state["current_response"]
-    contradictions = state["contradictions"]
-    history = state["conversation_history"]
-
-    if state["is_consistent"] or not contradictions:
-        state["refined_response"] = current_response
+    if state["is_consistent"] or not state["contradictions"]:
+        state["refined_response"] = state["current_response"]
         return state
 
-    # 如果已达最大递归深度，返回原回答但标注问题
     if state["recursion_depth"] >= state["max_recursion"]:
-        state["refined_response"] = current_response + "\n\n[注意：检测到潜在逻辑问题，建议咨询医生确认]"
+        state["refined_response"] = (
+            f"{state['current_response'].rstrip()}\n\n"
+            "当前回答存在前后不一致，建议咨询医生，并以原始报告和专业医生意见为准。"
+        )
         return state
 
-    # 构建修正提示
-    contradiction_desc = "\n".join([f"- {c}" for c in contradictions])
-
-    history_summary = "\n".join([
-        f"{msg['role']}: {msg['content']}"
-        for msg in history[-5:]
-    ])
-
-    prompt = f"""请修正以下回答中的逻辑矛盾问题。
-
-原始回答:
-{current_response}
-
-检测到的矛盾:
-{contradiction_desc}
-
-历史对话:
-{history_summary}
-
-请生成修正后的回答，确保:
-1. 解决上述矛盾
-2. 保持医学逻辑正确
-3. 回答完整且一致
-
-直接输出修正后的回答，不需要解释。"""
-
+    history = "\n".join(
+        f"{item.get('role')}: {item.get('content', '')}"
+        for item in state["conversation_history"][-5:]
+    )
+    evidence = "\n".join(
+        f"[{item.get('source_id', 'S?')}] {item.get('content', '')[:500]}"
+        for item in state.get("evidence", [])
+    )
+    prompt = (
+        "修正医疗辅助回答中的逻辑冲突。保留有证据的事实，不进行诊断或处方；"
+        "无法确认时明确不确定性。直接输出修正后的回答。\n"
+        f"历史：\n{history}\n当前回答：\n{state['current_response']}\n"
+        f"冲突：{state['contradictions']}\n证据：\n{evidence}"
+    )
     try:
-        refined = llm_client.chat(
+        refined = get_llm_client().chat(
             messages=[
-                {"role": "system", "content": "你是一个医疗助手。"},
-                {"role": "user", "content": prompt}
+                {"role": "system", "content": "你是谨慎的医疗辅助回答审校器。"},
+                {"role": "user", "content": prompt},
             ]
         )
-        state["refined_response"] = refined
+        state["refined_response"] = refined or state["current_response"]
     except Exception:
-        state["refined_response"] = current_response
-
+        state["refined_response"] = state["current_response"]
     state["recursion_depth"] += 1
+    state["current_response"] = state["refined_response"]
     return state
 
 
 def should_continue(state: FeedbackState) -> str:
-    """
-    判断是否需要继续递归修正。
-
-    如果修正后仍存在矛盾，且未超过最大递归深度，继续修正。
-    """
-    if state["is_consistent"]:
+    if state["is_consistent"] or state["recursion_depth"] >= state["max_recursion"]:
         return END
-
-    if state["recursion_depth"] >= state["max_recursion"]:
-        return END
-
-    # 重新检测矛盾
-    llm_client = get_llm_client()
-    refined = state["refined_response"]
-    history = state["conversation_history"]
-
-    history_summary = "\n".join([
-        f"{msg['role']}: {msg['content']}"
-        for msg in history[-5:]
-    ])
-
-    prompt = f"""分析修正后的回答与历史对话是否一致。
-
-历史对话:
-{history_summary}
-
-修正后回答:
-{refined}
-
-输出JSON:
-{{
-    "has_contradiction": true/false
-}}
-"""
-
-    try:
-        response = llm_client.chat_with_json(
-            messages=[
-                {"role": "system", "content": "你是一个医疗一致性分析助手。"},
-                {"role": "user", "content": prompt}
-            ]
-        )
-
-        if isinstance(response, dict) and response.get("has_contradiction", False):
-            return "refine"
-        else:
-            return END
-    except Exception:
-        return END
+    return "refine"
 
 
-def create_feedback_graph() -> StateGraph:
-    """
-    创建递归反馈图。
-
-    流程:
-    1. 检测矛盾
-    2. 如果有矛盾，修正回答
-    3. 重新检测
-    4. 最多递归max_recursion次
-    """
+def create_feedback_graph():
     graph = StateGraph(FeedbackState)
-
-    # 添加节点
     graph.add_node("detect", detect_contradictions)
     graph.add_node("refine", refine_response)
-
-    # 添加边
-    graph.add_conditional_edges(
-        "detect",
-        should_continue,
-        {
-            END: END,
-            "refine": "refine"
-        }
-    )
+    graph.add_conditional_edges("detect", should_continue, {END: END, "refine": "refine"})
     graph.add_edge("refine", "detect")
-
-    # 设置入口点
     graph.set_entry_point("detect")
-
     return graph.compile()
 
 
-# 全局反馈图实例
 _feedback_graph = None
 
 
-def get_feedback_graph() -> StateGraph:
-    """获取反馈图实例。"""
+def get_feedback_graph():
     global _feedback_graph
     if _feedback_graph is None:
         _feedback_graph = create_feedback_graph()
@@ -266,39 +180,39 @@ def get_feedback_graph() -> StateGraph:
 def validate_and_refine(
     response: str,
     conversation_history: List[Dict[str, str]],
-    max_recursion: int = 3
+    max_recursion: int = 3,
+    evidence: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """
-    验证并修正回答。
+    """Run bounded validation/refinement and return evidence metadata."""
 
-    Args:
-        response: 原始回答
-        conversation_history: 对话历史
-        max_recursion: 最大递归深度
-
-    Returns:
-        验证结果，包含修正后的回答、矛盾列表、递归深度等
-    """
-    graph = get_feedback_graph()
-
-    initial_state: FeedbackState = {
+    state: FeedbackState = {
         "original_response": response,
         "conversation_history": conversation_history,
         "current_response": response,
         "contradictions": [],
         "recursion_depth": 0,
-        "max_recursion": max_recursion,
+        "max_recursion": max(0, min(max_recursion, 5)),
         "is_consistent": False,
         "refined_response": response,
+        "evidence": evidence or [],
+        "evidence_score": None,
     }
 
-    result = graph.invoke(initial_state)
+    for _ in range(state["max_recursion"] + 1):
+        detect_contradictions(state)
+        if state["is_consistent"]:
+            break
+        before = state["current_response"]
+        refine_response(state)
+        if state["current_response"] == before and state["recursion_depth"] >= state["max_recursion"]:
+            break
 
     return {
-        "original_response": result["original_response"],
-        "refined_response": result["refined_response"],
-        "contradictions": result["contradictions"],
-        "recursion_depth": result["recursion_depth"],
-        "is_consistent": result["is_consistent"],
-        "feedback_applied": result["recursion_depth"] > 0,
+        "original_response": state["original_response"],
+        "refined_response": state["refined_response"],
+        "contradictions": state["contradictions"],
+        "recursion_depth": state["recursion_depth"],
+        "is_consistent": state["is_consistent"],
+        "feedback_applied": state["recursion_depth"] > 0,
+        "evidence_score": state["evidence_score"],
     }
