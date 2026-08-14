@@ -124,6 +124,7 @@ async def chat(request: ChatRequest, db: Session = Depends(db_dependency)):
         reply=safe_reply,
         department=result["department"],
         agent_used=result["agent_used"],
+        session_id=f"sess_{session.id}",
         intent_distribution=result["intent_distribution"],
         references=_references(result.get("retrieved_docs", [])),
         safety_check=safety,
@@ -137,21 +138,33 @@ async def chat(request: ChatRequest, db: Session = Depends(db_dependency)):
 
 
 @router.post("/chat/stream")
-async def chat_stream(request: ChatRequest):
+async def chat_stream(request: ChatRequest, db: Session = Depends(db_dependency)):
     async def event_generator() -> AsyncIterator[str]:
-        # 规范化 session_id（与 POST /chat 一致：sess_ 前缀 + 整数校验），
-        # 无效时拒绝而非把原始值传给下游。
         session_id = None
-        if request.session_id:
-            raw_id = request.session_id.removeprefix("sess_")
-            try:
-                int(raw_id)
-            except ValueError:
-                yield f"data: {json.dumps({'type': 'error', 'message': 'session_id 格式错误'}, ensure_ascii=False)}\n\n"
-                return
-            session_id = request.session_id
+        session = None
         try:
+            # 复用 POST /chat 的会话解析逻辑：sess_<int> 前缀 + 整数校验。
+            # 首次对话不带 session_id，由服务端创建并随 done 事件返回。
+            if request.session_id:
+                raw_id = request.session_id.removeprefix("sess_")
+                try:
+                    int(raw_id)
+                except ValueError:
+                    yield f"data: {json.dumps({'type': 'error', 'message': 'session_id 格式错误'}, ensure_ascii=False)}\n\n"
+                    return
             routing = await asyncio.to_thread(router_route, request.message, request.patient_id)
+            department = routing["routed_department"]
+            if request.session_id:
+                session = _session_from_request(db, request, department)
+            else:
+                session = ChatSession(
+                    patient_id=request.patient_id or "anonymous",
+                    current_department=department,
+                )
+                db.add(session)
+                db.flush()
+            session_id = f"sess_{session.id}"
+
             yield f"data: {json.dumps({'type': 'route', **routing}, ensure_ascii=False)}\n\n"
             result = await run_medical_query(
                 request.message,
@@ -161,9 +174,31 @@ async def chat_stream(request: ChatRequest):
                 pre_routed=routing,
             )
             safe_reply, safety = enforce_boundary(result["response"])
+
+            # 与 POST /chat 保持一致：持久化消息与路由日志
+            db.add(ChatMessage(session_id=session.id, role="user", content=request.message))
+            db.add(
+                ChatMessage(
+                    session_id=session.id,
+                    role="assistant",
+                    content=safe_reply,
+                    safety_check_result="PASS" if safety.passed else "BLOCKED",
+                )
+            )
+            db.add(
+                RoutingLog(
+                    session_id=session.id,
+                    user_query=request.message,
+                    intent_distribution=routing.get("intent_distribution", {}),
+                    routed_department=department,
+                    confidence=str(routing.get("confidence", "")),
+                )
+            )
+            db.commit()
+
             for chunk in (safe_reply[index : index + 80] for index in range(0, len(safe_reply), 80)):
                 yield f"data: {json.dumps({'type': 'delta', 'content': chunk}, ensure_ascii=False)}\n\n"
-            yield f"data: {json.dumps({'type': 'done', 'safety_check': safety.model_dump(by_alias=True)}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'session_id': session_id, 'department': result['department'], 'agent_used': result['agent_used'], 'safety_check': safety.model_dump(by_alias=True)}, ensure_ascii=False)}\n\n"
         except Exception as exc:
             # 中途异常必须显式发 error 事件，避免连接无声断开
             yield f"data: {json.dumps({'type': 'error', 'message': f'生成回答失败：{exc}'}, ensure_ascii=False)}\n\n"

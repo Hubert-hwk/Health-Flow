@@ -3,8 +3,9 @@ import { chat, chatStream, routeQuery } from '../api.js';
 
 // 生成一个内存中的会话 ID（会话仅保存在当前页面内存中）
 function makeSessionId() {
-  if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
-  return `sess-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  // 会话 ID 由后端分配（sess_<int>）；这里不再自造，首轮不传 session_id，
+  // 从响应/流式 done 事件中取回后端分配的 ID 用于后续轮次。
+  return null;
 }
 
 // 从意图分布中提取置信度最高的科室及置信度
@@ -138,11 +139,12 @@ export default function Chat() {
     if (!text || sending) return;
     setInput('');
 
-    // 首次发送时生成会话 ID，保存在内存中以支持多轮对话
+    // 首次发送时无会话 ID（后端分配后回传），后续轮次沿用
     const sid = sessionId || makeSessionId();
-    if (!sessionId) setSessionId(sid);
+    if (!sessionId && sid) setSessionId(sid);
 
-    const body = { message: text, include_history: true, session_id: sid };
+    const body = { message: text, include_history: true };
+    if (sid) body.session_id = sid;
     if (patientId.trim()) body.patient_id = patientId.trim();
 
     // 先插入用户消息与空的助手消息（流式输出时逐步填充）
@@ -166,7 +168,11 @@ export default function Chat() {
       await chatStream(body, {
         onDelta: (c) => updateLast((m) => ({ ...m, content: m.content + c })),
         onRoute: (evt) => updateLast((m) => ({ ...m, route: evt })),
-        onDone: (evt) => updateLast((m) => ({ ...m, streaming: false, meta: evt })),
+        onDone: (evt) => {
+          updateLast((m) => ({ ...m, streaming: false, meta: evt }));
+          // 后端在 done 事件中返回分配的会话 ID（sess_<int>），保存以支持多轮
+          if (evt && evt.session_id) setSessionId(evt.session_id);
+        },
         onError: (err) => { throw err; },
       });
     } catch (err) {
@@ -179,6 +185,7 @@ export default function Chat() {
           meta: data,
           content: (data && data.reply) || m.content,
         }));
+        if (data && data.session_id) setSessionId(data.session_id);
       } catch (err2) {
         updateLast((m) => ({ ...m, streaming: false, error: err2.message }));
       }

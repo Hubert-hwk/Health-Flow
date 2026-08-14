@@ -39,6 +39,18 @@ async function request(path, options = {}) {
   return res.text();
 }
 
+// 不拼 /api 前缀的原始请求（/health、/ready 挂在后端根路径）
+async function rawRequest(path, options = {}) {
+  const res = await fetch(path, options);
+  if (!res.ok) {
+    throw new Error(await parseError(res));
+  }
+  if (res.status === 204) return null;
+  const contentType = res.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) return res.json();
+  return res.text();
+}
+
 function jsonOptions(method, body) {
   return {
     method,
@@ -49,11 +61,11 @@ function jsonOptions(method, body) {
 
 /* ---------------- 系统状态 ---------------- */
 
-// GET /health —— 后端健康状态
-export const getHealth = () => request('/health');
+// GET /health —— 后端健康状态（根路径，不带 /api 前缀）
+export const getHealth = () => rawRequest('/health');
 
-// GET /ready —— 后端就绪状态（数据库 / Milvus / Neo4j 等依赖）
-export const getReady = () => request('/ready');
+// GET /ready —— 后端就绪状态（根路径，不带 /api 前缀；数据库 / Milvus / Neo4j 等依赖）
+export const getReady = () => rawRequest('/ready');
 
 /* ---------------- 报告 ---------------- */
 

@@ -60,6 +60,8 @@ class ChatResponse(BaseModel):
     reply: str
     department: str
     agent_used: str
+    # 服务端分配的会话 ID（sess_<int>），客户端应保存并在后续轮次回传
+    session_id: Optional[str] = None
     intent_distribution: Optional[Dict[str, float]] = None
     referenced_metrics: List[str] = Field(default_factory=list)
     references: List[ReferenceItem] = Field(default_factory=list)

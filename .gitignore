@@ -83,3 +83,6 @@ test*.jsonl
 debug*.txt
 dpo_analysis.txt
 dpo_debug.txt
+
+# 截图工具（本地临时，勿提交）
+.screenshot-tool/
