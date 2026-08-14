@@ -22,4 +22,16 @@ export default defineConfig({
       },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // 第三方库拆分为独立 chunk，优化首屏加载
+        manualChunks: {
+          react: ['react', 'react-dom'],
+          antd: ['antd', '@ant-design/icons'],
+          charts: ['recharts'],
+        },
+      },
+    },
+  },
 });

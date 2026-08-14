@@ -10,7 +10,10 @@
   },
   "dependencies": {
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "antd": "^6.6.0",
+    "@ant-design/icons": "^6.3.2",
+    "recharts": "^3.10.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

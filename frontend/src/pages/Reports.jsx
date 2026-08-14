@@ -1,29 +1,44 @@
 import React, { useState } from 'react';
+import {
+  Alert,
+  Button,
+  Card,
+  Descriptions,
+  Drawer,
+  Form,
+  Input,
+  message,
+  Popconfirm,
+  Space,
+  Table,
+  Tag,
+  Typography,
+} from 'antd';
+import { DeleteOutlined, EyeOutlined, SearchOutlined } from '@ant-design/icons';
 import { getReports, getReport, getReportMetrics, deleteReport } from '../api.js';
+import { abnormalTag } from './Upload.jsx';
 
-// 报告列表页：按患者编号查询报告，点击查看详情，支持删除
 export default function Reports() {
-  const [patientId, setPatientId] = useState('');
-  const [reports, setReports] = useState(null);   // null 表示尚未查询
+  const [form] = Form.useForm();
+  const [reports, setReports] = useState(null); // null = 尚未查询
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [selected, setSelected] = useState(null); // 当前查看的报告详情
+
+  const [detailOpen, setDetailOpen] = useState(false);
+  const [detail, setDetail] = useState(null);
   const [detailMetrics, setDetailMetrics] = useState([]);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState('');
-  const [deletingId, setDeletingId] = useState(null);
 
-  const search = async (e) => {
-    if (e) e.preventDefault();
-    if (!patientId.trim()) {
+  const search = async (values) => {
+    const pid = (values?.patient_id || '').trim();
+    if (!pid) {
       setError('请填写患者编号');
       return;
     }
     setError('');
-    setSelected(null);
     setLoading(true);
     try {
-      const data = await getReports({ patient_id: patientId.trim() });
+      const data = await getReports({ patient_id: pid, department: values?.department?.trim() || undefined });
       setReports(Array.isArray(data) ? data : (data && data.reports) || []);
     } catch (err) {
       setError(err.message);
@@ -33,189 +48,128 @@ export default function Reports() {
     }
   };
 
-  // 点击某条报告：并行加载详情与指标
   const openDetail = async (report) => {
-    setSelected(report);
+    setDetailOpen(true);
+    setDetail(report);
     setDetailMetrics([]);
-    setDetailError('');
     setDetailLoading(true);
     try {
-      const [detail, metrics] = await Promise.all([
+      const [detailData, metrics] = await Promise.all([
         getReport(report.id),
         getReportMetrics(report.id),
       ]);
-      // 详情对象优先，指标列表兜底
-      setSelected(detail && detail.id !== undefined ? detail : report);
-      const ms = Array.isArray(metrics) ? metrics : (detail && detail.metrics) || [];
-      setDetailMetrics(ms);
+      setDetail(detailData && detailData.id !== undefined ? detailData : report);
+      setDetailMetrics(Array.isArray(metrics) ? metrics : (detailData && detailData.metrics) || []);
     } catch (err) {
-      setDetailError(err.message);
-      // 详情接口失败时，尝试只用指标接口的结果
-      try {
-        const metrics = await getReportMetrics(report.id);
-        setDetailMetrics(Array.isArray(metrics) ? metrics : []);
-      } catch (e2) {
-        setDetailError(e2.message);
-      }
+      message.error(err.message);
     } finally {
       setDetailLoading(false);
     }
   };
 
-  const onDelete = async (report) => {
-    if (!window.confirm(`确定要删除报告 #${report.id} 吗？此操作不可恢复。`)) return;
-    setDeletingId(report.id);
+  const remove = async (reportId) => {
     try {
-      await deleteReport(report.id);
-      setSelected((cur) => (cur && cur.id === report.id ? null : cur));
-      // 刷新列表
-      const data = await getReports({ patient_id: patientId.trim() });
-      setReports(Array.isArray(data) ? data : (data && data.reports) || []);
+      const data = await deleteReport(reportId);
+      message.success(data?.message || '报告已删除');
+      setReports((prev) => (prev || []).filter((r) => r.id !== reportId));
+      if (detail?.id === reportId) setDetailOpen(false);
     } catch (err) {
-      setError(err.message);
-    } finally {
-      setDeletingId(null);
+      message.error(err.message);
     }
   };
 
-  const countMetrics = (r) => {
-    if (Array.isArray(r.metrics)) return r.metrics.length;
-    if (typeof r.metric_count === 'number') return r.metric_count;
-    return '—';
-  };
+  const columns = [
+    { title: 'ID', dataIndex: 'id', width: 70 },
+    { title: '类型', dataIndex: 'report_type', width: 90, render: (v) => <Tag>{v || '—'}</Tag> },
+    {
+      title: '检查日期', dataIndex: 'exam_date', width: 180,
+      render: (v) => (v ? new Date(v).toLocaleString() : '—'),
+    },
+    { title: '科室', dataIndex: 'department', width: 110, render: (v) => v || '—' },
+    {
+      title: '指标数', dataIndex: 'metrics', width: 90,
+      render: (ms) => (Array.isArray(ms) ? ms.length : '—'),
+    },
+    {
+      title: '操作', key: 'actions', width: 160,
+      render: (_, record) => (
+        <Space>
+          <Button size="small" icon={<EyeOutlined />} onClick={() => openDetail(record)}>详情</Button>
+          <Popconfirm title="确定删除该报告？" onConfirm={() => remove(record.id)}>
+            <Button size="small" danger icon={<DeleteOutlined />}>删除</Button>
+          </Popconfirm>
+        </Space>
+      ),
+    },
+  ];
 
   return (
-    <div>
-      <div className="card">
-        <h3 className="card-title">按患者查询报告</h3>
-        <form onSubmit={search} className="form-inline">
-          <input
-            type="text"
-            value={patientId}
-            onChange={(e) => setPatientId(e.target.value)}
-            placeholder="患者编号，例如 P001"
+    <div className="page-stack">
+      <Card title="报告查询">
+        <Form form={form} layout="inline" onFinish={search}>
+          <Form.Item name="patient_id" rules={[{ required: true, message: '请输入患者编号' }]}>
+            <Input placeholder="患者编号，例如 P001" style={{ width: 220 }} />
+          </Form.Item>
+          <Form.Item name="department">
+            <Input placeholder="科室（可选）" style={{ width: 160 }} />
+          </Form.Item>
+          <Form.Item>
+            <Button type="primary" htmlType="submit" icon={<SearchOutlined />} loading={loading}>查询</Button>
+          </Form.Item>
+        </Form>
+        {error && <Alert style={{ marginTop: 12 }} type="error" showIcon title={error} />}
+      </Card>
+
+      {reports !== null && (
+        <Card title={`报告列表（${reports.length} 条）`}>
+          <Table
+            rowKey="id"
+            columns={columns}
+            dataSource={reports}
+            pagination={{ pageSize: 10, showTotal: (t) => `共 ${t} 条` }}
+            locale={{ emptyText: '该患者暂无报告' }}
           />
-          <button type="submit" className="btn btn-primary" disabled={loading}>
-            {loading ? '查询中…' : '查询'}
-          </button>
-        </form>
-        {error && <div className="alert alert-error">{error}</div>}
-      </div>
-
-      {reports && (
-        <div className="card">
-          <h3 className="card-title">报告列表（{reports.length} 条）</h3>
-          {reports.length === 0 ? (
-            <p className="muted">未找到该患者的报告。</p>
-          ) : (
-            <table className="table">
-              <thead>
-                <tr>
-                  <th>ID</th>
-                  <th>类型</th>
-                  <th>检查日期</th>
-                  <th>科室</th>
-                  <th>指标数</th>
-                  <th>操作</th>
-                </tr>
-              </thead>
-              <tbody>
-                {reports.map((r) => (
-                  <tr
-                    key={r.id}
-                    className={selected && selected.id === r.id ? 'row-selected' : ''}
-                  >
-                    <td>{r.id}</td>
-                    <td>{r.report_type || '—'}</td>
-                    <td>{r.exam_date || '—'}</td>
-                    <td>{r.department || '—'}</td>
-                    <td>{countMetrics(r)}</td>
-                    <td className="cell-actions">
-                      <button className="btn btn-small" onClick={() => openDetail(r)}>
-                        {selected && selected.id === r.id ? '查看中…' : '查看详情'}
-                      </button>
-                      <button
-                        className="btn btn-small btn-danger"
-                        onClick={() => onDelete(r)}
-                        disabled={deletingId === r.id}
-                      >
-                        {deletingId === r.id ? '删除中…' : '删除'}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+        </Card>
       )}
 
-      {/* 报告详情 */}
-      {selected && (
-        <div className="card">
-          <h3 className="card-title">报告详情 #{selected.id}</h3>
-          <div className="meta-line">
-            <span>类型：{selected.report_type || '—'}</span>
-            <span>检查日期：{selected.exam_date || '—'}</span>
-            <span>科室：{selected.department || '—'}</span>
-            <span>创建时间：{selected.created_at || '—'}</span>
-          </div>
-
-          {detailLoading && <p className="muted">正在加载指标…</p>}
-          {detailError && <div className="alert alert-error">{detailError}</div>}
-
-          {!detailLoading && !detailError && (
-            detailMetrics.length > 0 ? (
-              <table className="table">
-                <thead>
-                  <tr>
-                    <th>指标名称</th>
-                    <th>数值</th>
-                    <th>单位</th>
-                    <th>参考范围</th>
-                    <th>趋势</th>
-                    <th>异常</th>
-                    <th>页码</th>
-                    <th>证据文本</th>
-                    <th>source_id</th>
-                    <th>bbox</th>
-                    <th>bbox_normalized</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {detailMetrics.map((m, i) => (
-                    <tr key={i}>
-                      <td>{m.metric_name || '—'}</td>
-                      <td>{m.metric_value ?? '—'}</td>
-                      <td>{m.unit || '—'}</td>
-                      <td>{m.reference_range || '—'}</td>
-                      <td>{m.trend || '—'}</td>
-                      <td>{abnormalBadge(m.abnormal_flag)}</td>
-                      <td>{m.page_number ?? '—'}</td>
-                      <td className="evidence-cell">{m.evidence_text || '—'}</td>
-                      <td>{m.source_id ?? '—'}</td>
-                      <td className="mono">{m.bbox ? JSON.stringify(m.bbox) : '—'}</td>
-                      <td className="mono">{m.bbox_normalized ? JSON.stringify(m.bbox_normalized) : '—'}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            ) : (
-              <p className="muted">该报告没有指标数据。</p>
-            )
-          )}
-        </div>
-      )}
+      <Drawer
+        title={detail ? `报告详情 #${detail.id}` : '报告详情'}
+        size="large"
+        open={detailOpen}
+        onClose={() => setDetailOpen(false)}
+      >
+        {detail && (
+          <Descriptions column={2} size="small" bordered style={{ marginBottom: 16 }}>
+            <Descriptions.Item label="患者编号">{detail.patient_id}</Descriptions.Item>
+            <Descriptions.Item label="报告类型">{detail.report_type}</Descriptions.Item>
+            <Descriptions.Item label="科室">{detail.department || '—'}</Descriptions.Item>
+            <Descriptions.Item label="检查日期">{detail.exam_date ? new Date(detail.exam_date).toLocaleString() : '—'}</Descriptions.Item>
+            <Descriptions.Item label="创建时间">{detail.created_at ? new Date(detail.created_at).toLocaleString() : '—'}</Descriptions.Item>
+          </Descriptions>
+        )}
+        <Typography.Title level={5}>指标明细</Typography.Title>
+        <Table
+          rowKey={(r) => `${r.source_id || r.metric_name}-${r.report_id || ''}`}
+          size="small"
+          loading={detailLoading}
+          dataSource={detailMetrics}
+          pagination={false}
+          scroll={{ x: 640 }}
+          columns={[
+            { title: '指标', dataIndex: 'metric_name', width: 130 },
+            { title: '数值', dataIndex: 'metric_value', width: 90 },
+            { title: '单位', dataIndex: 'unit', width: 80 },
+            { title: '参考范围', dataIndex: 'reference_range', width: 110 },
+            { title: '异常', dataIndex: 'abnormal_flag', width: 100, render: (v) => abnormalTag(v) },
+            { title: '页码', dataIndex: 'page_number', width: 60 },
+            { title: 'bbox', dataIndex: 'bbox', width: 170, render: (v) => (v ? JSON.stringify(v) : '—') },
+            { title: '归一化坐标', dataIndex: 'bbox_normalized', width: 170, render: (v) => (v ? JSON.stringify(v) : '—') },
+            { title: '证据原文', dataIndex: 'evidence_text', ellipsis: true },
+            { title: '来源', dataIndex: 'source_id', width: 100 },
+          ]}
+          locale={{ emptyText: '暂无指标数据' }}
+        />
+      </Drawer>
     </div>
   );
-}
-
-// 异常标记徽章：H=偏高 L=偏低 N=正常
-function abnormalBadge(flag) {
-  if (!flag) return <span className="badge badge-normal">N</span>;
-  const f = String(flag).toUpperCase();
-  if (f === 'H' || f === 'HIGH' || f === '高') return <span className="badge badge-high">H</span>;
-  if (f === 'L' || f === 'LOW' || f === '低') return <span className="badge badge-low">L</span>;
-  if (f === 'N' || f === 'NORMAL' || f === '正常') return <span className="badge badge-normal">N</span>;
-  return <span className="badge">{String(flag)}</span>;
 }
