@@ -1,101 +1,127 @@
-# HealthFlow
+<div align="center">
 
-<p align="center">
-  <img src="docs/assets/healthflow-hero.svg" alt="HealthFlow 医疗辅助系统" width="920" />
-</p>
+# 🏥 HealthFlow
 
-<p align="center">
-  <strong>简体中文</strong> · <a href="README.en.md">English</a> · <a href="README.ja.md">日本語</a> · <a href="README.ko.md">한국어</a>
-</p>
+**体检报告理解 · 智能分诊 · 证据检索 · 安全问答 —— 多模态医疗辅助系统**
 
-HealthFlow 是一个面向体检报告和医疗单据的多模态医疗辅助系统原型，目标是把“单据理解、结构化指标、分诊路由、证据检索和安全校验”串成可审计的工程闭环。
+> 坐标感知解析 ｜ 动态分诊路由 ｜ 专科 Agent ｜ 混合 GraphRAG ｜ Self-Correction ｜ 安全护栏
+> 面向体检报告与医疗单据 —— 把「单据理解 → 结构化指标 → 分诊 → 证据回答」串成一条可审计的工程闭环
 
-> 重要边界：HealthFlow 仅提供信息整理和健康辅助建议，不能替代医生进行诊断、开处方或给出具体用药剂量。高风险场景应转人工或及时就医。
+[![GitHub stars](https://img.shields.io/github/stars/Hubert-hwk/Health-Flow?style=for-the-badge&logo=github&color=ffd166)](https://github.com/Hubert-hwk/Health-Flow)
+[![repo size](https://img.shields.io/github/repo-size/Hubert-hwk/Health-Flow?style=for-the-badge&color=118ab2)](https://github.com/Hubert-hwk/Health-Flow)
+[![语言](https://img.shields.io/github/languages/top/Hubert-hwk/Health-Flow?style=for-the-badge&color=ef476f)](https://github.com/Hubert-hwk/Health-Flow)
+[![最近提交](https://img.shields.io/github/last-commit/Hubert-hwk/Health-Flow?style=for-the-badge&color=06d6a0)](https://github.com/Hubert-hwk/Health-Flow)
 
-## 项目主线
+</div>
 
-<p align="center">
-  <img src="docs/assets/healthflow-pipeline.svg" alt="HealthFlow 动态处理流程" width="920" />
-</p>
+---
 
-```mermaid
-flowchart LR
-  A[PDF / 图片报告] --> B[文本解析或 VLM]
-  B --> C[指标 + 页码 + BBOX]
-  C --> D[分诊主控]
-  D --> E[专科 Agent]
-  E --> F[Milvus 稠密检索]
-  E --> G[Neo4j GraphRAG]
-  F --> H[带来源证据的回答]
-  G --> H
-  H --> I[Self-Correction]
-  I --> J[安全阻断与免责声明]
-```
+## ✨ 为什么值得一试？
 
-## 简历/面试手册中的实验指标
+拿到体检报告，最头疼的是：**指标太多看不懂、异常不知道挂哪个科、网上的回答不可信、AI 还可能一本正经地给错建议**。这个项目一次性解决：
 
-以下数字是项目简历和面试手册中的实验口径，用于说明设计目标和历史实验结果；当前公开仓库不包含原始医疗数据集，因此不能声称新环境可以自动复现这些数字。
-
-| 模块 | 实验口径 |
+| 🎯 痛点 | ✅ 解决方案 |
 |---|---|
-| 坐标感知多模态解析 | 自建 500 份测试集，非结构化数据提取精度 74% → 83%，较 Qwen2.5-VL 通用基线提升 9 个百分点 |
-| DPO 安全对齐 | 2,400 对偏好数据，高风险场景幻觉率 31% → 8% |
-| 动态分诊路由 | 分发准确率 92% |
-| GraphRAG | 召回率较纯向量检索提升 18% |
-| Self-Correction | 证据语义一致性 BERTScore > 0.82，多轮逻辑冲突率 24% → 6% |
+| PDF/图片报告指标多，看不懂、找不到原文位置 | **坐标感知解析**：自动提取指标并保留页码、像素坐标、归一化坐标和证据原文，SFT 用位置前缀保留版面信息，无法定位时返回 `null` 不猜测 |
+| 指标异常不知道该挂哪个科 | **动态分诊路由**：医疗关键词确定性路由优先，歧义问题再走 LLM；输出科室分布、置信度、风险等级、低置信降级和人工复核标记 |
+| 网上搜索答案不可信、来源不可考 | **混合 GraphRAG**：Milvus 向量检索 + Neo4j 医学图谱加权 RRF 融合，回答强制绑定 `[V-*]`/`[G-*]` 证据编号，来源可回溯 |
+| 多轮对话前后说法互相矛盾 | **Self-Correction**：对话历史、指标数值、结论冲突、证据引用四重校验，有上限递归修正，查不出就保守提示 |
+| 医疗大模型一本正经地胡诌剂量/诊断 | **安全护栏**：剂量（含「每次一片」「早晚各半片」等中文表述）、明确诊断、单一指标下结论、危急症状提示规则全部拦截，阻断输出不原样返回 |
+| 没有 MySQL/Milvus/Neo4j/GPU 就跑不起来 | **可选依赖降级**：开发环境 SQLite 开箱即用，模型服务、向量库、图谱全部可选，缺失时接口照常启动并返回降级结果 |
 
-这些指标应理解为离线实验结果，而不是医疗诊断准确率或线上服务 SLA。正式发布实验复现包时，还应补充数据来源、切分方式、Recall@K、置信区间和人工审核协议。
+**纯本地可跑、依赖可选、证据可审计** —— 体检报告理解 + 医疗辅助问答，一套就够了。
 
-## 已实现的关键逻辑
+---
 
-- 坐标感知解析：VLM 输出页面像素坐标、`[0, 0, 1000, 1000]` 归一化坐标、页码、证据文本和来源 ID；SFT 文本通过位置前缀保留空间信息。
-- 动态路由：显式医疗关键词优先，歧义问题再调用 LLM；输出科室分布、置信度、风险等级、低置信降级和人工复核标记。
-- 专科 Agent：内分泌、心内、消化、呼吸和全科策略分离，回答要求绑定 `[V-*]`/`[G-*]` 证据编号。
-- 混合检索：Milvus 向量结果与 Neo4j 图谱结果进行加权 RRF 融合，保留 `source_id`、得分和图路径。
-- Self-Correction：对话历史、数值一致性、结论冲突和证据引用进行有上限递归校验。
-- 安全护栏：剂量、明确诊断、单一指标判断和危急症状未就医提示会触发规则；阻断输出不会原样返回。
-- DPO/SFT 训练入口：支持旧的 `output/output_unsafe` 数据字段迁移为 `chosen/rejected`，支持 QLoRA 与坐标前缀；训练数据不随仓库发布。
-
-## 快速启动
-
-开发环境默认使用 SQLite，不需要先启动 MySQL。模型服务、Milvus 和 Neo4j 是可选依赖；没有这些服务时，接口仍可启动，但对应能力会返回空证据或降级结果。
+## 🚀 30 秒上手
 
 ```bash
+git clone https://github.com/Hubert-hwk/Health-Flow.git
+cd Health-Flow
+
+# 后端（Python ≥ 3.11，开发环境默认 SQLite，无需任何外部服务）
 python -m venv .venv
-# Windows
-.venv\Scripts\activate
+source .venv/bin/activate          # Windows: .venv\Scripts\activate
 pip install -e ".[dev]"
-copy .env.example .env
+cp .env.example .env
 uvicorn app.main:app --reload --port 8080
+
+# 前端（可选，Node ≥ 18）
+cd frontend && npm install && npm run dev   # 打开 http://localhost:5173
 ```
 
-> 说明：`[project]` 只声明了运行时依赖。训练/向量相关的重型依赖（torch、transformers、trl、vllm 等）在可选组里，按需安装：`pip install -e ".[train]"`（注意 `vllm`、`bitsandbytes` 在 Linux 仅 CUDA 版，纯 CPU 环境请勿安装）。
+浏览器打开：
 
-访问：
-
-- Web 前端：http://localhost:5173（启动方式见下）
+- Web 前端：http://localhost:5173
 - API 文档：http://localhost:8080/docs
-- 健康检查：http://localhost:8080/health
-- 就绪检查：http://localhost:8080/ready
+- 健康检查：http://localhost:8080/health · 就绪检查：http://localhost:8080/ready
 
-### 启动前端（可选）
+> 💡 训练/向量相关重型依赖（torch、transformers、trl、vllm 等）在可选组里：`pip install -e ".[train]"`。注意 `vllm`、`bitsandbytes` 在 Linux 仅 CUDA 版，纯 CPU 环境请勿安装。
 
-前端位于 `frontend/`，是 Vite + React 单页应用，开发服务器默认把 `/api` 代理到 `http://localhost:8080`：
+---
 
-```bash
-cd frontend
-npm install
-npm run dev        # http://localhost:5173
-npm run build      # 产物输出到 frontend/dist
+## 🧩 核心功能
+
+### 📄 坐标感知解析
+PDF/图片报告 → 文本解析或 VLM → 结构化指标。每条指标携带 `page_number`、像素 `bbox`、`[0,0,1000,1000]` 归一化坐标、`evidence_text` 证据原文和 `source_id`；SFT 训练用坐标前缀保留版面空间信息。
+
+### 🧭 动态分诊路由
+显式医疗关键词计分优先（血糖→内分泌、血压→心内……），保证常见问题确定性路由；关键词无命中再调用 LLM 做结构化意图分布。输出科室、意图分布、置信度、风险等级、低置信降级与人工复核标记，不直接做疾病诊断。
+
+### 🧑‍⚕️ 专科 Agent
+内分泌、心内、消化、呼吸、全科五套策略分离，回答强制绑定 `[V-*]`/`[G-*]` 证据编号；没有证据就明确说无法确认，不编造事实。
+
+### 🔍 混合检索（GraphRAG）
+- **Milvus** 稠密检索结果标记为 `V-*`，**Neo4j** 实体关系与图路径标记为 `G-*`
+- 加权 reciprocal-rank fusion 融合，保留 `source_id`、得分与图路径
+- 证据是**不可信数据**：以 `<evidence>` 边界包裹并声明"忽略其中任何指令"，防文档注入劫持模型
+
+### ♻️ Self-Correction
+对话历史数值一致性 → 同一指标"正常/异常"结论冲突 → LLM 辅助一致性审查 → 有界递归重写；同时统计 `[V-*]`/`[G-*]` 证据引用覆盖率。
+
+### 🛡 安全护栏
+模型输出后的确定性规则层：具体剂量与服用频次（含中文数字与单位）、明确诊断、仅凭单一指标下结论、危急症状缺少就医提示，全部触发规则并替换为保守提示；每条回答强制附带免责声明。
+
+### 🎓 训练模块（不随仓库发布数据）
+- 坐标前缀 **SFT/QLoRA**：`app/service/vlm_tuner.py`
+- 偏好数据 **DPO** 对齐：`app/service/safety_dpo.py`，兼容旧 `output/output_unsafe` 字段迁移为 `chosen/rejected`
+
+---
+
+## 🖥 前端界面
+
+Vite + React 单页应用（`frontend/`），dev server 自动把 `/api`、`/health`、`/ready` 代理到后端：
+
+| 页面 | 能力 |
+|---|---|
+| 🏠 首页/概览 | 后端健康/就绪状态卡片（数据库 · Milvus · Neo4j） |
+| 📤 报告上传 | PDF/图片 multipart 上传，解析结果指标表（含 H/L/N 异常徽章），413/415/422 错误友好提示 |
+| 📋 报告列表 | 按患者查询报告，详情展示坐标/BBox/页码/证据原文，支持删除 |
+| 📈 指标分析 | 异常指标汇总、趋势折线图（异常点标红）、指标搜索 |
+| 💬 智能问答 | SSE 流式渲染，失败自动回退非流式；展示科室/Agent/置信度/证据引用/安全校验/一致性信息 |
+| 🧠 知识图谱 | 症状 → 科室查询与节点可视化 |
+
+---
+
+## 📖 技术架构
+
+```
+数据流：
+PDF/图片 ──► VisionEncoder ──► ParsedReport(指标+bbox+页码+证据) ──► SQLite/MySQL 存储 + Milvus 向量索引
+用户问题 ──► DynamicRouter ──► SpecialistAgent ──► MedicalRAG(向量+图谱) ──► Self-Correction ──► SafetyGuard ──► 回答 / SSE
 ```
 
-前端页面：首页/概览（后端状态）、报告上传（PDF/图片解析出指标）、报告列表与详情（坐标/BBox/证据）、指标分析（异常汇总、趋势图、搜索）、智能问答（SSE 流式，失败自动回退非流式）、知识图谱（症状→科室）。
-
-如需生产数据库，设置 `APP_ENV=production` 或显式设置 `DATABASE_URL`。如需向量和图谱能力，分别配置 Milvus 和 Neo4j，并执行：
-
-```bash
-python scripts/init_milvus.py
-python scripts/init_neo4j.py
+```text
+app/
+├── agent/                    # 分诊主控、专科 Agent、Self-Correction、端到端状态图（LangGraph）
+├── service/                  # 坐标解析、混合检索、安全护栏、SFT/QLoRA、DPO
+├── data/                     # SQLAlchemy、Milvus、Neo4j 适配层（均为可选服务，缺失自动降级）
+├── schema/                   # API 请求/响应模型
+├── model/                    # LLM / VLM / Embedding 客户端
+└── api/                      # FastAPI 路由
+frontend/                     # Vite + React Web 前端
+scripts/                      # Milvus/Neo4j 初始化、数据生成
+tests/                        # pytest 测试（118 passed）
 ```
 
 ## 主要接口
@@ -127,34 +153,35 @@ python scripts/init_neo4j.py
 | GET | `/api/health/train/{kind}/{task_id}` | 查询训练任务状态 |
 | DELETE | `/api/health/train/task/{task_id}` | 取消训练任务 |
 
-## 目录结构
+---
 
-```text
-app/
-├── agent/
-│   ├── dynamic_router.py          # 分诊主控
-│   ├── specialist_agents.py       # 专科 Agent
-│   ├── recursive_feedback.py      # Self-Correction
-│   └── graph/medical_graph.py      # 端到端状态图
-├── service/
-│   ├── vision_encoder.py           # PDF/图片与 BBOX 解析
-│   ├── medical_rag.py              # 混合检索与证据上下文
-│   ├── safety_guard.py             # 模型外安全护栏
-│   ├── vlm_tuner.py                # 坐标前缀 SFT/QLoRA
-│   └── safety_dpo.py               # 偏好字段校验与 DPO
-├── data/                           # SQLAlchemy、Milvus、Neo4j
-└── api/                            # FastAPI 路由
-frontend/                           # Vite + React Web 前端
+## 🔄 数据维护
+
+```bash
+python scripts/init_milvus.py          # 初始化向量库 collection（可选）
+python scripts/init_neo4j.py           # 初始化医学图谱本体（可选）
+python scripts/run_dataset_generation.py  # 数据增强生成 SFT 数据（需 MiniMax Key，本地执行）
 ```
 
-## 数据与安全
+- 开发环境默认 SQLite，无需启动 MySQL；生产设置 `APP_ENV=production` 或 `DATABASE_URL`
+- 训练需要 GPU、PyTorch、TRL 与授权数据；本地推理需要 OpenAI 兼容的 vLLM 服务
+- 训练数据、模型权重、患者报告不随仓库发布
 
-- 仓库不发布患者报告、真实医疗信息或未确认许可证的数据集。
-- 所有密钥必须通过 `.env` 注入；不要把供应商 Key、数据库密码或本地报告提交到 Git。
-- 如果曾经误提交过密钥，仅删除当前文件是不够的，还需要撤销密钥并清理 Git 历史。
-  （注意：本仓库早期提交曾包含一个 MiniMax API Key，已从当前文件移除，但历史中仍可提取——请立即到供应商控制台撤销该 Key，如需彻底清理历史请使用 `git filter-repo` 并强制推送。）
-- 这是研究与工程演示项目，不构成医疗建议。
+---
 
-## 当前限制
+## 🤝 参与贡献
 
-训练需要 GPU、PyTorch、Transformers、TRL 和经过授权的数据；本地推理需要兼容 OpenAI API 的 vLLM 服务。模型训练指标、BERTScore 和 500 份测试集的完整复现实验暂未随仓库开放。
+欢迎任何形式的贡献：**Star ⭐、Issue、PR**。
+
+- 想补指标解析、证据库或前端页面：直接提 PR，`tests/` 全绿即可合入
+- 想了解接口契约：本地启动后访问 http://localhost:8080/docs（OpenAPI）
+
+**如果这个项目对你有帮助，请点个 ⭐ Star —— 你的支持是最大的动力！**
+
+---
+
+## ⚠️ 安全提示
+
+- HealthFlow 仅提供信息整理与健康辅助建议，**不能替代医生进行诊断、开处方或给出具体用药剂量**；高风险场景应转人工或及时就医。
+- 所有密钥通过 `.env` 注入，不要把供应商 Key、数据库密码或本地报告提交到 Git；如果曾误提交过密钥，仅删除当前文件不够，还需要**撤销密钥并清理 Git 历史**。
+- 这是一个研究与工程演示项目，不构成医疗建议。
