@@ -18,11 +18,11 @@ function pickTopIntent(dist) {
   return best;
 }
 
-// 读取安全校验中的红旗标记：后端键名为中文「红旗标记」，兼容 red_flag
+// 读取安全校验中的红旗标记：后端规范键为 red_flag；兼容旧版本的中文键「红旗标记」
 function getRedFlag(safety) {
   if (!safety || typeof safety !== 'object') return false;
-  if (safety['红旗标记'] !== undefined) return Boolean(safety['红旗标记']);
   if (safety.red_flag !== undefined) return Boolean(safety.red_flag);
+  if (safety['红旗标记'] !== undefined) return Boolean(safety['红旗标记']);
   return false;
 }
 
