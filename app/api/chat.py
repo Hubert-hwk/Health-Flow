@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from types import GeneratorType
-from typing import AsyncIterator, Dict, Optional
+from typing import AsyncIterator
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -13,8 +12,7 @@ from sqlalchemy.orm import Session
 
 from app.agent.dynamic_router import route as router_route
 from app.agent.graph.medical_graph import run_medical_query
-from app.config import get_settings
-from app.data import get_db
+from app.api.deps import db_dependency
 from app.data.models import ChatMessage, ChatSession, RoutingLog
 from app.schema.chat import (
     ChatRequest,
@@ -25,51 +23,15 @@ from app.schema.chat import (
     RoutingResponse,
     SafetyCheckResult,
 )
-from app.service.medical_rag import get_medical_rag_service
 from app.service.safety_guard import check_response, enforce_boundary
 
 
 router = APIRouter()
 
 
-def db_dependency():
-    """Stable FastAPI dependency wrapper that also keeps test overrides simple."""
-    from app.data import get_db as current_get_db
-
-    value = current_get_db()
-    if isinstance(value, GeneratorType):
-        yield from value
-    else:
-        yield value
-
-
 def check_safety(content: str) -> SafetyCheckResult:
     """Backward-compatible public wrapper used by the safety endpoint."""
     return check_response(content)
-
-
-def build_rag_context(user_query: str, department: str) -> str:
-    try:
-        return get_medical_rag_service().build_context(user_query, department)
-    except Exception:
-        return ""
-
-
-async def generate_response(
-    user_query: str,
-    patient_id: Optional[str],
-    session_id: Optional[str],
-    department: str,
-    conversation_history: list,
-) -> tuple[str, bool, int]:
-    """Compatibility helper; the graph is the single generation path."""
-    result = await run_medical_query(
-        user_query,
-        patient_id=patient_id,
-        session_id=session_id,
-        conversation_history=conversation_history,
-    )
-    return result["response"], result["feedback_applied"], result["recursion_depth"]
 
 
 def _session_from_request(db: Session, request: ChatRequest, department: str) -> ChatSession:
@@ -177,19 +139,34 @@ async def chat(request: ChatRequest, db: Session = Depends(db_dependency)):
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     async def event_generator() -> AsyncIterator[str]:
-        routing = await asyncio.to_thread(router_route, request.message, request.patient_id)
-        yield f"data: {json.dumps({'type': 'route', **routing}, ensure_ascii=False)}\n\n"
-        result = await run_medical_query(
-            request.message,
-            patient_id=request.patient_id,
-            session_id=request.session_id,
-            conversation_history=[],
-            pre_routed=routing,
-        )
-        safe_reply, safety = enforce_boundary(result["response"])
-        for chunk in (safe_reply[index : index + 80] for index in range(0, len(safe_reply), 80)):
-            yield f"data: {json.dumps({'type': 'delta', 'content': chunk}, ensure_ascii=False)}\n\n"
-        yield f"data: {json.dumps({'type': 'done', 'safety_check': safety.model_dump(by_alias=True)}, ensure_ascii=False)}\n\n"
+        # 规范化 session_id（与 POST /chat 一致：sess_ 前缀 + 整数校验），
+        # 无效时拒绝而非把原始值传给下游。
+        session_id = None
+        if request.session_id:
+            raw_id = request.session_id.removeprefix("sess_")
+            try:
+                int(raw_id)
+            except ValueError:
+                yield f"data: {json.dumps({'type': 'error', 'message': 'session_id 格式错误'}, ensure_ascii=False)}\n\n"
+                return
+            session_id = request.session_id
+        try:
+            routing = await asyncio.to_thread(router_route, request.message, request.patient_id)
+            yield f"data: {json.dumps({'type': 'route', **routing}, ensure_ascii=False)}\n\n"
+            result = await run_medical_query(
+                request.message,
+                patient_id=request.patient_id,
+                session_id=session_id,
+                conversation_history=[],
+                pre_routed=routing,
+            )
+            safe_reply, safety = enforce_boundary(result["response"])
+            for chunk in (safe_reply[index : index + 80] for index in range(0, len(safe_reply), 80)):
+                yield f"data: {json.dumps({'type': 'delta', 'content': chunk}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'type': 'done', 'safety_check': safety.model_dump(by_alias=True)}, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            # 中途异常必须显式发 error 事件，避免连接无声断开
+            yield f"data: {json.dumps({'type': 'error', 'message': f'生成回答失败：{exc}'}, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(
         event_generator(),
@@ -218,6 +195,5 @@ async def safety_check(content: str):
         "passed": result.passed,
         "warnings": result.warnings,
         "red_flag": result.red_flag,
-        "红旗标记": result.red_flag,
         "critical": result.critical,
     }

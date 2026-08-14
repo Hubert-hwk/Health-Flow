@@ -4,7 +4,6 @@
 这些接口主要用于触发训练流程，实际训练在后台异步执行。
 """
 
-from typing import Optional
 from fastapi import APIRouter, HTTPException, BackgroundTasks
 import uuid
 from datetime import datetime

@@ -48,7 +48,7 @@ def client():
 def test_chat_endpoint_basic(client):
     """Test basic chat endpoint."""
     with patch('app.api.chat.router_route') as mock_route, \
-         patch('app.api.chat.get_db') as mock_db:
+         patch('app.data.get_db') as mock_db:
 
         mock_route.return_value = {
             "routed_department": "内分泌科",
@@ -98,7 +98,7 @@ def test_safety_check_endpoint(client):
     data = response.json()
     assert "passed" in data
     assert "warnings" in data
-    assert data["红旗标记"] is True  # Contains dosage recommendation
+    assert data["red_flag"] is True  # Contains dosage recommendation
 
 
 def test_safety_check_pass(client):

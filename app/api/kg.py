@@ -3,7 +3,7 @@
 提供知识图谱查询接口。
 """
 
-from typing import List, Optional
+from typing import List
 from fastapi import APIRouter, HTTPException, Query, Path
 
 router = APIRouter()
@@ -43,7 +43,7 @@ def query_knowledge_graph(
             "count": len(results)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+        raise HTTPException(status_code=503, detail="知识图谱服务不可用，请稍后重试")
 
 
 @router.get("/kg/symptoms/{disease}")
@@ -69,7 +69,7 @@ def get_disease_symptoms(
             "count": len(symptoms)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+        raise HTTPException(status_code=503, detail="知识图谱服务不可用，请稍后重试")
 
 
 @router.get("/kg/drugs/{disease}")
@@ -95,7 +95,7 @@ def get_disease_drugs(
             "count": len(drugs)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+        raise HTTPException(status_code=503, detail="知识图谱服务不可用，请稍后重试")
 
 
 @router.get("/kg/examinations/{disease}")
@@ -121,7 +121,7 @@ def get_disease_examinations(
             "count": len(examinations)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+        raise HTTPException(status_code=503, detail="知识图谱服务不可用，请稍后重试")
 
 
 @router.get("/kg/department/{symptom}")
@@ -147,7 +147,7 @@ def get_symptom_department(
             "source": "knowledge_graph"
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"查询失败: {str(e)}")
+        raise HTTPException(status_code=503, detail="知识图谱服务不可用，请稍后重试")
 
 
 @router.post("/kg/diagnosis")
@@ -179,7 +179,7 @@ def find_diagnosis(
             "count": len(diagnosis_paths)
         }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"诊断推理失败: {str(e)}")
+        raise HTTPException(status_code=503, detail="知识图谱服务不可用，请稍后重试")
 
 
 @router.get("/kg/health")
@@ -203,5 +203,4 @@ def kg_health_check():
         return {
             "status": "error",
             "service": "neo4j",
-            "error": str(e)
         }

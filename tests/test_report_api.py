@@ -80,7 +80,8 @@ def test_upload_report_endpoint(client):
         fake_pdf = b'%PDF-1.4 fake pdf content'
 
         response = client.post(
-            "/api/health/report/upload?patient_id=P001&department=内分泌科",
+            "/api/health/report/upload",
+            data={"patient_id": "P001", "department": "内分泌科"},
             files={"file": ("test.pdf", io.BytesIO(fake_pdf), "application/pdf")}
         )
 

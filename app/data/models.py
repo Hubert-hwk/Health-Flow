@@ -80,7 +80,7 @@ class RoutingLog(Base):
     user_query = Column(Text)
     intent_distribution = Column(JSON)
     routed_department = Column(String(64))
-    confidence = Column(String(8))
+    confidence = Column(String(32))
     created_at = Column(DateTime, default=datetime.now)
 
     session = relationship("ChatSession", back_populates="routing_logs")

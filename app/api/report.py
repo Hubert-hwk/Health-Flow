@@ -5,14 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 from datetime import datetime
-from types import GeneratorType
 from typing import Optional
 
-from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from sqlalchemy.orm import Session
 
+from app.api.deps import db_dependency
 from app.config import get_settings
-from app.data import get_db
 from app.data.milvus_client import get_milvus_client
 from app.data.models import MedicalReport as ReportModel, MetricRecord as MetricModel
 from app.model.embedding import get_embedding_client
@@ -22,16 +21,6 @@ from app.service.vision_encoder import get_vision_encoder_service
 
 router = APIRouter()
 ALLOWED_EXTENSIONS = {".pdf", ".jpg", ".jpeg", ".png", ".gif", ".bmp"}
-
-
-def db_dependency():
-    from app.data import get_db as current_get_db
-
-    value = current_get_db()
-    if isinstance(value, GeneratorType):
-        yield from value
-    else:
-        yield value
 
 
 def _metric_response(metric: MetricModel) -> MetricRecord:
@@ -60,12 +49,15 @@ def _metric_response(metric: MetricModel) -> MetricRecord:
 
 @router.post("/report/upload", response_model=MedicalReportResponse)
 async def upload_report(
-    patient_id: str,
-    report_type: Optional[str] = None,
-    department: Optional[str] = None,
+    patient_id: str = Form(..., min_length=1, description="患者 ID（必填，非空）"),
+    report_type: Optional[str] = Form(None),
+    department: Optional[str] = Form(None),
     file: UploadFile = File(...),
     db: Session = Depends(db_dependency),
 ):
+    patient_id = patient_id.strip()
+    if not patient_id:
+        raise HTTPException(status_code=422, detail="patient_id 不能为空")
     filename = file.filename or "unknown"
     suffix = "." + filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
     if suffix not in ALLOWED_EXTENSIONS:
@@ -219,10 +211,12 @@ async def delete_report(report_id: int, db: Session = Depends(db_dependency)):
     report = db.query(ReportModel).filter(ReportModel.id == report_id).first()
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
+    # 先删数据库主记录；向量索引是尽力而为，放在 DB 成功之后，
+    # 避免 DB 删除失败时向量索引已被清掉造成状态不一致。
+    db.delete(report)
+    db.commit()
     try:
         await asyncio.to_thread(get_milvus_client().delete_by_report_id, report_id)
     except Exception:
         pass
-    db.delete(report)
-    db.commit()
     return {"message": "报告已删除", "report_id": report_id}

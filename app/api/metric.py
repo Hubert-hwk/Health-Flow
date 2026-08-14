@@ -9,7 +9,6 @@ from sqlalchemy.orm import Session
 from datetime import datetime, timedelta
 import json
 
-from app.data import get_db
 from app.data.mysql_client import get_mysql_client
 from app.data.models import MedicalReport as ReportModel, MetricRecord as MetricModel
 from app.schema.report import MetricRecord
@@ -22,7 +21,7 @@ router = APIRouter()
 def get_metric_trend(
     patient_id: str,
     metric_name: str = Query(..., description="指标名称，如空腹血糖"),
-    days: int = Query(90, description="查询天数范围")
+    days: int = Query(90, ge=1, description="查询天数范围")
 ):
     """
     获取指标趋势分析。
@@ -143,7 +142,7 @@ def search_metrics(
     keyword: Optional[str] = None,
     department: Optional[str] = None,
     abnormal_only: bool = False,
-    limit: int = 50
+    limit: int = Query(50, ge=1, le=200)
 ):
     """
     搜索指标记录。
@@ -220,7 +219,7 @@ def search_metrics(
 @router.get("/metric/anomalies")
 def get_anomalies(
     patient_id: str,
-    days: int = Query(30, description="查询天数范围")
+    days: int = Query(30, ge=1, description="查询天数范围")
 ):
     """
     获取患者异常指标汇总。

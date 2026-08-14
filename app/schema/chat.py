@@ -43,10 +43,10 @@ class ReferenceItem(BaseModel):
 class SafetyCheckResult(BaseModel):
     passed: bool
     warnings: List[str] = Field(default_factory=list)
-    red_flag: bool = Field(False, alias="红旗标记")
+    # 保持纯英文字段名：FastAPI 默认按别名序列化，中文别名会导致
+    # 前端拿到「红旗标记」而不是 red_flag，各接口返回不一致。
+    red_flag: bool = False
     critical: bool = False
-
-    model_config = ConfigDict(populate_by_name=True)
 
 
 class FeedbackInfo(BaseModel):
