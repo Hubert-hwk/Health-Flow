@@ -216,9 +216,15 @@ def get_llm_client() -> LLMClient:
     return _llm_client
 
 
+_vlm_client: VLMClient | None = None
+
+
 def get_vlm_client() -> VLMClient:
-    """获取VLM客户端单例."""
-    return VLMClient()
+    """获取VLM客户端单例（避免每次调用都新建客户端）。"""
+    global _vlm_client
+    if _vlm_client is None:
+        _vlm_client = VLMClient()
+    return _vlm_client
 
 
 class MiniMaxClient(LLMClient):

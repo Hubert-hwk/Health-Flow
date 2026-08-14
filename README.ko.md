@@ -22,8 +22,6 @@ HealthFlow는 건강검진 보고서와 의료 문서를 위한 멀티모달 의
 - LangGraph 오케스트레이션: 라우팅, 검색, 전문 Agent 응답 생성, 제한된 Self-Correction을 타입이 있는 상태 그래프로 실행합니다.
 - 하이브리드 GraphRAG: Milvus의 밀집 벡터 검색과 Neo4j의 제약된 의료 그래프 경로 및 출처 정보를 결합합니다.
 - 안전 우선 응답 생성: 결정론적 규칙, 근거 인용, 불확실성, 사람 검토 플래그를 함께 사용합니다.
-- Python 중심 구현: Python 버전을 현재 AI/Agent 개발의 주 구현으로 사용하고, Java 버전은 엔지니어링 비교용으로 유지합니다.
-
 ## 아키텍처
 
 ```mermaid
@@ -78,7 +76,6 @@ route → retrieve → generate → validate
 개발 환경은 기본적으로 SQLite를 사용합니다. 모델 서버, Milvus, Neo4j는 선택 사항이며, 설정하지 않아도 API는 실행되고 해당 기능은 명시적인 대체 결과를 반환합니다.
 
 ```bash
-cd healthflow-python
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
@@ -89,9 +86,23 @@ uvicorn app.main:app --reload --port 8080
 
 접속 주소:
 
+- 웹 프런트엔드: http://localhost:5173 (아래 참조)
 - API 문서: http://localhost:8080/docs
 - 상태 확인: http://localhost:8080/health
 - 준비 상태 확인: http://localhost:8080/ready
+
+### 프런트엔드(선택)
+
+`frontend/`는 Vite + React 단일 페이지 앱입니다. 개발 서버는 `/api`를 `http://localhost:8080`으로 프록시합니다.
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5173
+npm run build      # frontend/dist에 출력
+```
+
+페이지: 대시보드(백엔드 상태), 보고서 업로드, 보고서 목록/상세, 지표 분석(이상·추세·검색), 채팅(SSE 스트리밍), 지식 그래프(증상→진료과).
 
 운영 데이터베이스를 사용하려면 `APP_ENV=production` 또는 `DATABASE_URL`을 설정합니다. 벡터 및 그래프 검색을 사용하려면 Milvus와 Neo4j를 구성한 뒤 다음 명령을 실행합니다.
 

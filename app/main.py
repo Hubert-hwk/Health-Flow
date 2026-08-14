@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.config import get_settings
 from app.data.milvus_client import get_milvus_client
@@ -64,12 +65,37 @@ async def readiness_check():
     database = get_mysql_client()
     milvus = get_milvus_client()
     neo4j = get_neo4j_client()
+
+    db_ok = False
+    try:
+        with database.engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+        db_ok = True
+    except Exception:
+        db_ok = False
+
     return {
-        "status": "ready",
-        "database": "ok",
-        "milvus": "ok" if milvus.available else "optional_unavailable",
-        "neo4j": "ok" if neo4j.available else "optional_unavailable",
+        "status": "ready" if db_ok else "degraded",
+        "database": "ok" if db_ok else "unavailable",
+        "milvus": "ok" if _milvus_probe(milvus) else "optional_unavailable",
+        "neo4j": "ok" if _neo4j_probe(neo4j) else "optional_unavailable",
     }
+
+
+def _milvus_probe(client) -> bool:
+    """真实的 Milvus 连通性探测：客户端对象存在不代表服务可用。"""
+    try:
+        return bool(client.client and client.client.list_collections() is not None)
+    except Exception:
+        return False
+
+
+def _neo4j_probe(client) -> bool:
+    """真实的 Neo4j 连通性探测：执行一次 RETURN 1。"""
+    try:
+        return bool(client.connect())
+    except Exception:
+        return False
 
 
 from app.api import chat, kg, metric, report, train  # noqa: E402

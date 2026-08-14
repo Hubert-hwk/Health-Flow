@@ -6,6 +6,10 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# Milvus/Neo4j SDK 未安装时跳过本模块（这些测试通过 patch 字符串目标依赖 SDK 可导入）。
+pytest.importorskip("pymilvus")
+pytest.importorskip("neo4j")
+
 
 class TestInitMilvus:
     """Tests for Milvus initialization."""

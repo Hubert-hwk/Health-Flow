@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langgraph.graph import END, StateGraph
@@ -17,6 +18,7 @@ class MedicalGraphState(TypedDict):
     patient_id: Optional[str]
     session_id: Optional[str]
     conversation_history: List[Dict[str, str]]
+    pre_routed: Optional[Dict[str, Any]]
     routed_department: str
     intent_distribution: Dict[str, float]
     reasoning: str
@@ -50,7 +52,27 @@ def create_medical_graph():
     return graph.compile()
 
 
+_medical_graph = None
+
+
+def get_medical_graph():
+    global _medical_graph
+    if _medical_graph is None:
+        _medical_graph = create_medical_graph()
+    return _medical_graph
+
+
 def routing_node(state: MedicalGraphState) -> MedicalGraphState:
+    pre_routed = state.get("pre_routed")
+    if pre_routed:
+        # chat 端点已先算过路由，直接复用，避免同一请求打两次 LLM 分类
+        for key in (
+            "routed_department", "intent_distribution", "reasoning", "confidence",
+            "low_confidence", "human_review_required", "risk_level",
+        ):
+            state[key] = pre_routed.get(key, state.get(key))
+        state["error"] = None
+        return state
     try:
         result = router_route(state["user_query"], state.get("patient_id"))
         for key in (
@@ -84,6 +106,7 @@ def retrieval_node(state: MedicalGraphState) -> MedicalGraphState:
         )
         state["retrieved_docs"] = results
         state["rag_context"] = context
+        state["error"] = None
     except Exception as exc:
         state["retrieved_docs"] = []
         state["rag_context"] = ""
@@ -103,6 +126,7 @@ def generation_node(state: MedicalGraphState) -> MedicalGraphState:
         state["response"] = response
         state["refined_response"] = response
         state["agent_used"] = f"{state.get('routed_department', '全科')}SpecialistAgent"
+        state["error"] = None
     except Exception as exc:
         state["response"] = "当前模型服务不可用，暂时无法生成回答。请稍后重试。"
         state["refined_response"] = state["response"]
@@ -131,12 +155,14 @@ async def run_medical_query(
     patient_id: Optional[str] = None,
     session_id: Optional[str] = None,
     conversation_history: Optional[List[Dict[str, str]]] = None,
+    pre_routed: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     initial_state: MedicalGraphState = {
         "user_query": user_query,
         "patient_id": patient_id,
         "session_id": session_id,
         "conversation_history": conversation_history or [],
+        "pre_routed": pre_routed,
         "routed_department": "全科",
         "intent_distribution": {},
         "reasoning": "",
@@ -155,7 +181,7 @@ async def run_medical_query(
         "agent_used": "",
         "error": None,
     }
-    result = create_medical_graph().invoke(initial_state)
+    result = await asyncio.to_thread(get_medical_graph().invoke, initial_state)
     return {
         "response": result["refined_response"],
         "department": result["routed_department"],

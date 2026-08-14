@@ -19,7 +19,7 @@ router = APIRouter()
 
 
 @router.get("/metric/trend")
-async def get_metric_trend(
+def get_metric_trend(
     patient_id: str,
     metric_name: str = Query(..., description="指标名称，如空腹血糖"),
     days: int = Query(90, description="查询天数范围")
@@ -129,16 +129,16 @@ async def get_metric_trend(
             "data_points": data_points,
             "statistics": {
                 "count": len(values),
-                "average": round(avg_value, 2) if avg_value else None,
-                "min": round(min_value, 2) if min_value else None,
-                "max": round(max_value, 2) if max_value else None,
+                "average": round(avg_value, 2) if avg_value is not None else None,
+                "min": round(min_value, 2) if min_value is not None else None,
+                "max": round(max_value, 2) if max_value is not None else None,
                 "overall_trend": overall_trend
             }
         }
 
 
 @router.get("/metric/search")
-async def search_metrics(
+def search_metrics(
     patient_id: str,
     keyword: Optional[str] = None,
     department: Optional[str] = None,
@@ -218,7 +218,7 @@ async def search_metrics(
 
 
 @router.get("/metric/anomalies")
-async def get_anomalies(
+def get_anomalies(
     patient_id: str,
     days: int = Query(30, description="查询天数范围")
 ):

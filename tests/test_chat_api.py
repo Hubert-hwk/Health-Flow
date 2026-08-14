@@ -112,12 +112,11 @@ def test_safety_check_pass(client):
 
 def test_chat_request_validation(client):
     """Test chat request validation."""
-    # Empty message should fail
+    # Empty message should fail with 422 (min_length=1)
     response = client.post("/api/health/chat", json={
         "message": ""
     })
-    # FastAPI validation should reject empty string
-    assert response.status_code == 422 or response.status_code == 500
+    assert response.status_code == 422
 
 
 def test_health_endpoint(client):

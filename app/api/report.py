@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import datetime
 from types import GeneratorType
@@ -70,13 +71,24 @@ async def upload_report(
     if suffix not in ALLOWED_EXTENSIONS:
         raise HTTPException(status_code=415, detail="仅支持 PDF 或常见图片格式")
 
-    content = await file.read()
+    # 分块读取并在超限时提前终止，避免超大文件先整体进内存再检查（内存 DoS）
+    max_bytes = get_settings().MAX_UPLOAD_BYTES
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            raise HTTPException(status_code=413, detail="文件超过大小限制")
+        chunks.append(chunk)
+    content = b"".join(chunks)
     if not content:
         raise HTTPException(status_code=400, detail="文件内容为空")
-    if len(content) > get_settings().MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="文件超过大小限制")
 
-    parsed = get_vision_encoder_service().parse(content, filename)
+    # 解析是 CPU/IO 密集（pdfplumber/PyMuPDF 渲染 + VLM 调用），放入线程池避免阻塞事件循环
+    parsed = await asyncio.to_thread(get_vision_encoder_service().parse, content, filename)
     if not parsed.success:
         raise HTTPException(status_code=422, detail=f"报告解析失败：{parsed.error}")
 
@@ -121,15 +133,18 @@ async def upload_report(
     # report remains the source of truth when the vector service is offline.
     if parsed.raw_text.strip():
         try:
-            vector = get_embedding_client().embed(parsed.raw_text)
-            client = get_milvus_client()
-            client.insert(
-                report_ids=[report.id],
-                texts=[parsed.raw_text],
-                embeddings=[vector],
-                departments=[department] if department else None,
-            )
-            client.flush()
+            def _index_report() -> None:
+                vector = get_embedding_client().embed(parsed.raw_text)
+                client = get_milvus_client()
+                client.insert(
+                    report_ids=[report.id],
+                    texts=[parsed.raw_text],
+                    embeddings=[vector],
+                    departments=[department] if department else None,
+                )
+                client.flush()
+
+            await asyncio.to_thread(_index_report)
         except Exception:
             pass
 
@@ -205,7 +220,7 @@ async def delete_report(report_id: int, db: Session = Depends(db_dependency)):
     if not report:
         raise HTTPException(status_code=404, detail="报告不存在")
     try:
-        get_milvus_client().delete_by_report_id(report_id)
+        await asyncio.to_thread(get_milvus_client().delete_by_report_id, report_id)
     except Exception:
         pass
     db.delete(report)

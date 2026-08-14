@@ -17,7 +17,7 @@ def _get_neo4j_client():
 
 
 @router.post("/kg/query")
-async def query_knowledge_graph(
+def query_knowledge_graph(
     entity: str = Query(..., description="实体名称"),
     limit: int = Query(10, description="返回结果数量")
 ):
@@ -47,7 +47,7 @@ async def query_knowledge_graph(
 
 
 @router.get("/kg/symptoms/{disease}")
-async def get_disease_symptoms(
+def get_disease_symptoms(
     disease: str = Path(..., description="疾病名称")
 ):
     """
@@ -73,7 +73,7 @@ async def get_disease_symptoms(
 
 
 @router.get("/kg/drugs/{disease}")
-async def get_disease_drugs(
+def get_disease_drugs(
     disease: str = Path(..., description="疾病名称")
 ):
     """
@@ -99,7 +99,7 @@ async def get_disease_drugs(
 
 
 @router.get("/kg/examinations/{disease}")
-async def get_disease_examinations(
+def get_disease_examinations(
     disease: str = Path(..., description="疾病名称")
 ):
     """
@@ -125,7 +125,7 @@ async def get_disease_examinations(
 
 
 @router.get("/kg/department/{symptom}")
-async def get_symptom_department(
+def get_symptom_department(
     symptom: str = Path(..., description="症状名称")
 ):
     """
@@ -151,7 +151,7 @@ async def get_symptom_department(
 
 
 @router.post("/kg/diagnosis")
-async def find_diagnosis(
+def find_diagnosis(
     symptoms: List[str] = Query(..., description="症状列表")
 ):
     """
@@ -183,7 +183,7 @@ async def find_diagnosis(
 
 
 @router.get("/kg/health")
-async def kg_health_check():
+def kg_health_check():
     """
     知识图谱健康检查。
 

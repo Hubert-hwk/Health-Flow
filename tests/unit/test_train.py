@@ -6,6 +6,12 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+# 训练栈（transformers/trl/datasets）是可选依赖，未安装时跳过整个模块，
+# 而不是在收集阶段抛 ModuleNotFoundError。
+pytest.importorskip("transformers")
+pytest.importorskip("trl")
+pytest.importorskip("datasets")
+
 
 class TestVLMTunerConfig:
     """Tests for VLMTunerConfig."""

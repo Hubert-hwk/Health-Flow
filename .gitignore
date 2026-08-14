@@ -49,6 +49,10 @@ htmlcov/
 data/sft/*.jsonl
 data/sft/*.json
 !data/sft/.gitkeep
+data/*.db
+data/*.sqlite
+data/*.sqlite3
+data/augmented_*.json
 
 # Logs
 *.log
@@ -58,10 +62,19 @@ dataset_generation.log
 output/
 *.ckpt
 *.safetensors
+*.bin
+*.pt
+*.pth
+*.gguf
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/dist/
+frontend/.npm-cache/
 
 # Temporary files
 test*.txt

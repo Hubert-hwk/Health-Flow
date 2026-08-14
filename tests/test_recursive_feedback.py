@@ -48,27 +48,32 @@ def test_detect_contradictions_no_history():
 
 
 def test_detect_contradictions_with_contradiction(mock_llm):
-    """Test contradiction detection with actual contradiction."""
+    """Test contradiction detection with an actual deterministic contradiction."""
     from app.agent.recursive_feedback import detect_contradictions, FeedbackState
 
     state: FeedbackState = {
-        "original_response": "您的空腹血糖为6.5mmol/L，属于正常范围。",
+        "original_response": "您的空腹血糖为5.2mmol/L。",
         "conversation_history": [
-            {"role": "user", "content": "我空腹血糖6.5"},
-            {"role": "assistant", "content": "您的空腹血糖偏高，超过正常上限6.1mmol/L。"}
+            {"role": "user", "content": "我空腹血糖多少？"},
+            {"role": "assistant", "content": "您的空腹血糖为6.5mmol/L。"}
         ],
-        "current_response": "您的空腹血糖为6.5mmol/L，属于正常范围。",
+        "current_response": "您的空腹血糖为5.2mmol/L。",
         "contradictions": [],
         "recursion_depth": 0,
         "max_recursion": 3,
         "is_consistent": False,
-        "refined_response": ""
+        "refined_response": "",
+        "evidence": [],
+        "evidence_score": None,
     }
 
-    # The mock returns has_contradiction=False, so this should pass
     result = detect_contradictions(state)
 
-    assert "is_consistent" in result
+    # 同一指标「空腹血糖为」在历史与当前回答中数值不同（6.5 vs 5.2），
+    # 确定性规则应检出矛盾，而不是依赖恒真断言。
+    assert result["is_consistent"] is False
+    assert len(result["contradictions"]) > 0
+    assert any("空腹血糖为" in item for item in result["contradictions"])
 
 
 def test_refine_response_no_contradiction():
@@ -134,8 +139,8 @@ def test_should_continue_end_when_consistent():
     assert result == END
 
 
-def test_validate_and_refine_basic():
-    """Test the main validate_and_refine function."""
+def test_validate_and_refine_basic(mock_llm):
+    """Test the main validate_and_refine function (hermetic: LLM is mocked)."""
     from app.agent.recursive_feedback import validate_and_refine
 
     result = validate_and_refine(

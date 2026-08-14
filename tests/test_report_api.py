@@ -1,10 +1,15 @@
 """Tests for Report API."""
 
-import pytest
-from unittest.mock import MagicMock, patch
-from fastapi.testclient import TestClient
 import io
 
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.pool import StaticPool
+from unittest.mock import MagicMock, patch
+
+from app.data.models import Base
 
 class MockVisionService:
     """Mock VisionEncoder service."""
@@ -54,13 +59,24 @@ def client():
 
 
 def test_upload_report_endpoint(client):
-    """Test report upload endpoint."""
+    """Test report upload endpoint against a real in-memory SQLite database."""
+    engine = create_engine(
+        "sqlite://",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(bind=engine)
+
+    def override_get_db():
+        with SessionLocal() as session:
+            yield session
+
     with patch('app.api.report.get_vision_encoder_service', return_value=MockVisionService()), \
          patch('app.api.report.get_embedding_client', return_value=MockEmbeddingClient()), \
          patch('app.api.report.get_milvus_client', return_value=MockMilvusClient()), \
-         patch('app.data.get_db'):
+         patch('app.data.get_db', override_get_db):
 
-        # Create a fake PDF file
         fake_pdf = b'%PDF-1.4 fake pdf content'
 
         response = client.post(
@@ -68,8 +84,13 @@ def test_upload_report_endpoint(client):
             files={"file": ("test.pdf", io.BytesIO(fake_pdf), "application/pdf")}
         )
 
-        # May fail without actual DB, but should not crash
-        assert response.status_code in [200, 500]
+        assert response.status_code == 200, response.text
+        data = response.json()
+        assert data["id"] is not None
+        assert data["patient_id"] == "P001"
+        assert data["department"] == "内分泌科"
+        assert data["report_type"] == "体检"
+        assert isinstance(data["metrics"], list)
 
 
 def test_get_report_endpoint_not_found(client):

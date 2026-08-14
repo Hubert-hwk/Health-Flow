@@ -22,8 +22,6 @@ HealthFlow は、健康診断レポートや医療文書を対象としたマル
 - LangGraph によるオーケストレーション：ルーティング、検索、専門 Agent の回答生成、上限付き Self-Correction を型付き状態グラフで実行します。
 - ハイブリッド GraphRAG：Milvus のベクトル検索と、Neo4j の制約付き医療グラフパス・出典情報を融合します。
 - 安全性を優先した回答生成：決定論的ルール、根拠参照、不確実性、人手確認フラグを組み合わせます。
-- Python が主実装：Python 版を現在の AI/Agent 開発の主線とし、Java 版はエンジニアリング比較用に保持しています。
-
 ## アーキテクチャ
 
 ```mermaid
@@ -78,7 +76,6 @@ route → retrieve → generate → validate
 開発環境では SQLite を標準で使用します。モデルサービス、Milvus、Neo4j はオプションです。未設定の場合も API は起動し、該当機能は明示的なフォールバック結果を返します。
 
 ```bash
-cd healthflow-python
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
@@ -89,9 +86,23 @@ uvicorn app.main:app --reload --port 8080
 
 アクセス先：
 
+- Web フロントエンド：http://localhost:5173（下記参照）
 - API ドキュメント：http://localhost:8080/docs
 - ヘルスチェック：http://localhost:8080/health
 - Readiness：http://localhost:8080/ready
+
+### フロントエンド（任意）
+
+`frontend/` は Vite + React のシングルページアプリです。開発サーバーは `/api` を `http://localhost:8080` へプロキシします。
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5173
+npm run build      # frontend/dist に出力
+```
+
+ページ：ダッシュボード（バックエンド状態）、レポートアップロード、レポート一覧/詳細、指標分析（異常・トレンド・検索）、チャット（SSE ストリーミング）、ナレッジグラフ（症状→診療科）。
 
 本番データベースを使う場合は `APP_ENV=production` または `DATABASE_URL` を設定してください。ベクトル検索とグラフ検索を有効にする場合は Milvus と Neo4j を設定してから、次を実行します。
 

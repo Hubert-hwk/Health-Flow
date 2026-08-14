@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import GeneratorType
 from typing import AsyncIterator, Dict, Optional
@@ -122,7 +123,8 @@ def _references(results: list[dict]) -> list[ReferenceItem]:
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(request: ChatRequest, db: Session = Depends(db_dependency)):
-    routing = router_route(request.message, request.patient_id)
+    # 路由内部含同步 LLM/Neo4j 调用，放入线程池避免阻塞事件循环
+    routing = await asyncio.to_thread(router_route, request.message, request.patient_id)
     department = routing["routed_department"]
     session = _session_from_request(db, request, department)
     history = _history(db, session.id, request.include_history)
@@ -132,6 +134,7 @@ async def chat(request: ChatRequest, db: Session = Depends(db_dependency)):
         patient_id=request.patient_id,
         session_id=f"sess_{session.id}",
         conversation_history=history,
+        pre_routed=routing,
     )
     safe_reply, safety = enforce_boundary(result["response"])
 
@@ -174,13 +177,14 @@ async def chat(request: ChatRequest, db: Session = Depends(db_dependency)):
 @router.post("/chat/stream")
 async def chat_stream(request: ChatRequest):
     async def event_generator() -> AsyncIterator[str]:
-        routing = router_route(request.message, request.patient_id)
+        routing = await asyncio.to_thread(router_route, request.message, request.patient_id)
         yield f"data: {json.dumps({'type': 'route', **routing}, ensure_ascii=False)}\n\n"
         result = await run_medical_query(
             request.message,
             patient_id=request.patient_id,
             session_id=request.session_id,
             conversation_history=[],
+            pre_routed=routing,
         )
         safe_reply, safety = enforce_boundary(result["response"])
         for chunk in (safe_reply[index : index + 80] for index in range(0, len(safe_reply), 80)):
@@ -196,7 +200,7 @@ async def chat_stream(request: ChatRequest):
 
 @router.post("/routing", response_model=RoutingResponse)
 async def routing(request: RoutingRequest):
-    result = router_route(request.query, request.patient_id)
+    result = await asyncio.to_thread(router_route, request.query, request.patient_id)
     return RoutingResponse(
         routed_department=result["routed_department"],
         intent_distribution=result["intent_distribution"],

@@ -22,8 +22,6 @@ HealthFlow is a multimodal medical-assistant prototype for health-check reports 
 - LangGraph orchestration: runs routing, retrieval, specialist generation and bounded self-correction as a typed state graph.
 - Hybrid GraphRAG: fuses dense retrieval from Milvus with constrained medical paths and provenance from Neo4j.
 - Safety-first response generation: combines deterministic rules, evidence references, uncertainty and human-review flags.
-- Python mainline: the Python implementation is the active AI/Agent path; the Java version remains an engineering reference.
-
 ## Architecture
 
 ```mermaid
@@ -78,7 +76,6 @@ These are not medical diagnosis accuracy or production SLA numbers. A reproducib
 The development profile uses SQLite by default. Model serving, Milvus and Neo4j are optional; without them, the API still starts and returns explicit degraded/fallback results.
 
 ```bash
-cd healthflow-python
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
@@ -87,11 +84,27 @@ copy .env.example .env
 uvicorn app.main:app --reload --port 8080
 ```
 
+> Note: `[project]` only declares runtime dependencies. Heavy training/vector dependencies (torch, transformers, trl, vllm, ...) live in optional groups; install with `pip install -e ".[train]"` (vllm/bitsandbytes are CUDA-only on Linux — do not install on CPU-only machines).
+
 Open:
 
+- Web UI: http://localhost:5173 (see below)
 - API docs: http://localhost:8080/docs
 - Health check: http://localhost:8080/health
 - Readiness check: http://localhost:8080/ready
+
+### Frontend (optional)
+
+The `frontend/` directory is a Vite + React single-page app. Its dev server proxies `/api` to `http://localhost:8080`:
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5173
+npm run build      # outputs to frontend/dist
+```
+
+Pages: dashboard (backend status), report upload (PDF/image → parsed metrics), report list/detail (bbox/evidence), metric analysis (anomalies, trend chart, search), chat (SSE streaming with non-streaming fallback), knowledge graph (symptom → department).
 
 For production persistence, set `APP_ENV=production` or `DATABASE_URL`. To enable graph/vector retrieval, configure Milvus and Neo4j and run:
 

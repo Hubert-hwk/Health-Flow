@@ -32,8 +32,6 @@ flowchart LR
   I --> J[安全阻断与免责声明]
 ```
 
-Python 是当前主线；同仓库中的 Java 版本保留作工程化对照实现，训练与数据处理逻辑以 Python 为准。
-
 ## 简历/面试手册中的实验指标
 
 以下数字是项目简历和面试手册中的实验口径，用于说明设计目标和历史实验结果；当前公开仓库不包含原始医疗数据集，因此不能声称新环境可以自动复现这些数字。
@@ -63,7 +61,6 @@ Python 是当前主线；同仓库中的 Java 版本保留作工程化对照实�
 开发环境默认使用 SQLite，不需要先启动 MySQL。模型服务、Milvus 和 Neo4j 是可选依赖；没有这些服务时，接口仍可启动，但对应能力会返回空证据或降级结果。
 
 ```bash
-cd healthflow-python
 python -m venv .venv
 # Windows
 .venv\Scripts\activate
@@ -72,11 +69,27 @@ copy .env.example .env
 uvicorn app.main:app --reload --port 8080
 ```
 
+> 说明：`[project]` 只声明了运行时依赖。训练/向量相关的重型依赖（torch、transformers、trl、vllm 等）在可选组里，按需安装：`pip install -e ".[train]"`（注意 `vllm`、`bitsandbytes` 在 Linux 仅 CUDA 版，纯 CPU 环境请勿安装）。
+
 访问：
 
+- Web 前端：http://localhost:5173（启动方式见下）
 - API 文档：http://localhost:8080/docs
 - 健康检查：http://localhost:8080/health
 - 就绪检查：http://localhost:8080/ready
+
+### 启动前端（可选）
+
+前端位于 `frontend/`，是 Vite + React 单页应用，开发服务器默认把 `/api` 代理到 `http://localhost:8080`：
+
+```bash
+cd frontend
+npm install
+npm run dev        # http://localhost:5173
+npm run build      # 产物输出到 frontend/dist
+```
+
+前端页面：首页/概览（后端状态）、报告上传（PDF/图片解析出指标）、报告列表与详情（坐标/BBox/证据）、指标分析（异常汇总、趋势图、搜索）、智能问答（SSE 流式，失败自动回退非流式）、知识图谱（症状→科室）。
 
 如需生产数据库，设置 `APP_ENV=production` 或显式设置 `DATABASE_URL`。如需向量和图谱能力，分别配置 Milvus 和 Neo4j，并执行：
 
@@ -91,10 +104,28 @@ python scripts/init_neo4j.py
 |---|---|---|
 | POST | `/api/health/report/upload` | 上传 PDF/图片并解析指标 |
 | GET | `/api/health/report/{id}` | 查询报告和坐标指标 |
+| GET | `/api/health/report/{id}/metrics` | 查询报告指标列表 |
+| GET | `/api/health/reports` | 报告列表（按 patient_id/科室过滤） |
+| DELETE | `/api/health/report/{report_id}` | 删除报告 |
 | POST | `/api/health/chat` | 分诊、检索、专科回答和安全校验 |
 | POST | `/api/health/chat/stream` | SSE 流式返回 |
 | POST | `/api/health/routing` | 仅执行分诊路由 |
 | GET | `/api/health/safety/check` | 独立安全检查 |
+| GET | `/api/health/metric/trend` | 指标趋势分析 |
+| GET | `/api/health/metric/search` | 指标搜索 |
+| GET | `/api/health/metric/anomalies` | 异常指标汇总 |
+| POST | `/api/health/kg/query` | 知识图谱实体查询 |
+| GET | `/api/health/kg/symptoms/{disease}` | 疾病相关症状 |
+| GET | `/api/health/kg/drugs/{disease}` | 疾病相关药品 |
+| GET | `/api/health/kg/examinations/{disease}` | 疾病相关检查 |
+| GET | `/api/health/kg/department/{symptom}` | 症状所属科室 |
+| POST | `/api/health/kg/diagnosis` | 症状到疑似疾病推理 |
+| GET | `/api/health/kg/health` | 图谱连接状态 |
+| POST | `/api/health/train/augment` | 触发数据增强任务 |
+| POST | `/api/health/train/finetune` | 触发模型微调任务 |
+| POST | `/api/health/train/dpo` | 触发 DPO 训练任务 |
+| GET | `/api/health/train/{kind}/{task_id}` | 查询训练任务状态 |
+| DELETE | `/api/health/train/task/{task_id}` | 取消训练任务 |
 
 ## 目录结构
 
@@ -113,6 +144,7 @@ app/
 │   └── safety_dpo.py               # 偏好字段校验与 DPO
 ├── data/                           # SQLAlchemy、Milvus、Neo4j
 └── api/                            # FastAPI 路由
+frontend/                           # Vite + React Web 前端
 ```
 
 ## 数据与安全
@@ -120,6 +152,7 @@ app/
 - 仓库不发布患者报告、真实医疗信息或未确认许可证的数据集。
 - 所有密钥必须通过 `.env` 注入；不要把供应商 Key、数据库密码或本地报告提交到 Git。
 - 如果曾经误提交过密钥，仅删除当前文件是不够的，还需要撤销密钥并清理 Git 历史。
+  （注意：本仓库早期提交曾包含一个 MiniMax API Key，已从当前文件移除，但历史中仍可提取——请立即到供应商控制台撤销该 Key，如需彻底清理历史请使用 `git filter-repo` 并强制推送。）
 - 这是研究与工程演示项目，不构成医疗建议。
 
 ## 当前限制

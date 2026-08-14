@@ -3,6 +3,8 @@ name = "healthflow-python"
 version = "0.1.0"
 description = "HealthFlow Medical Assistant - Python Version"
 requires-python = ">=3.11"
+# 运行时依赖保持精简：训练/向量服务等重型依赖全部移到 optional-dependencies，
+# 这样在纯 CPU 新环境 `pip install -e ".[dev]"` 即可启动 API 并跑测试。
 dependencies = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
@@ -11,35 +13,43 @@ dependencies = [
     "sqlalchemy>=2.0.25",
     "pymysql>=1.1.0",
     "cryptography>=42.0.0",
-    "pymilvus>=2.4.0",
-    "milvus-lite>=2.4.0",
-    "neo4j>=5.18.0",
-    "langchain>=0.1.0",
+    "python-multipart>=0.0.6",
+    "python-dotenv>=1.0.0",
+    "langgraph>=0.0.20",
     "langchain-openai>=0.0.5",
     "langchain-core>=0.1.0",
-    "langgraph>=0.0.20",
-    "vllm>=0.3.0",
-    "sentence-transformers>=2.3.0",
+    "openai>=1.10.0",
+    "numpy>=1.26.0",
+    # 可选外部服务客户端（延迟导入；服务不可用时接口仍可启动）
+    "pymilvus>=2.4.0",
+    "neo4j>=5.18.0",
+    # 报告解析（延迟导入）
     "pdfplumber>=0.10.3",
     "PyMuPDF>=1.23.0",
     "Pillow>=10.0.0",
-    "python-multipart>=0.0.6",
-    "python-dotenv>=1.0.0",
-    "openai>=1.10.0",
-    "numpy>=1.26.0",
-    "pandas>=2.0.0",
-    "matplotlib>=3.8.0",
+]
+
+[project.optional-dependencies]
+# 训练/数据生成所需（vllm、bitsandbytes 在 Linux 仅 CUDA 版，CPU 机器请勿安装）
+train = [
+    "torch>=2.1.0",
     "transformers>=4.37.0",
     "datasets>=2.18.0",
-    "torch>=2.1.0",
     "peft>=0.8.0",
     "bitsandbytes>=0.41.0",
     "trl>=0.7.0",
     "accelerate>=0.25.0",
+    "sentence-transformers>=2.3.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.8.0",
     "scikit-learn>=1.4.0",
+    # 本地推理服务端（不在此仓库代码中 import，作为外部服务运行）
+    "vllm>=0.3.0",
 ]
-
-[project.optional-dependencies]
+# 本地 Milvus 服务（体积大，默认不装）
+milvus = [
+    "milvus-lite>=2.4.0",
+]
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",

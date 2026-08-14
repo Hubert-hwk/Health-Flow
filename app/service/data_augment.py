@@ -186,7 +186,7 @@ class DataAugmentationPipeline:
                 output=output,
                 category="体检报告解读",
                 source="template",
-                metadata={"template_type": template_type, "seed": i}
+                metadata={"template_type": "examination", "seed": i}
             ))
 
         return pairs
